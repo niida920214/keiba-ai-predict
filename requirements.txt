@@ -12,3 +12,4 @@ matplotlib
 playwright
 tabulate
 streamlit
+huggingface_hub
