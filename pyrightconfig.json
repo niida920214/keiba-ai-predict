@@ -1,0 +1,16 @@
+{
+    "pythonVersion": "3.13",
+    "pythonPlatform": "Windows",
+    "venvPath": "",
+    "pythonPath": "C:\\Users\\carsk\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "reportMissingImports": false,
+    "reportMissingModuleSource": false,
+    "reportOptionalMemberAccess": false,
+    "reportAttributeAccessIssue": false,
+    "reportArgumentType": false,
+    "reportCallIssue": false,
+    "reportReturnType": false,
+    "reportOperatorIssue": false,
+    "reportIndexIssue": false,
+    "reportIncompatibleMethodOverride": false
+}

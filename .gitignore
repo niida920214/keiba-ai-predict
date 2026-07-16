@@ -1,0 +1,22 @@
+# 仮想環境
+.venv/
+
+# シークレット（パスワード等。絶対にコミットしない）
+.streamlit/secrets.toml
+
+# データ（数GB級。予測に必要な軽量メタのみ例外的に含める）
+data/*
+!data/processed
+data/processed/*
+!data/processed/predict_meta.pickle
+optuna_study.db
+
+# 出力・キャッシュ
+results/
+__pycache__/
+*.pyc
+
+# ローカル設定・過去物
+.claude/
+.vscode/
+archive/

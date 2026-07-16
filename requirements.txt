@@ -1,0 +1,14 @@
+pandas
+numpy
+requests
+beautifulsoup4
+tqdm
+lxml
+html5lib
+scikit-learn
+lightgbm
+optuna
+matplotlib
+playwright
+tabulate
+streamlit
