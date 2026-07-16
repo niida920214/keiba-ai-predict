@@ -40,7 +40,18 @@ DATA_FILES = {
     "model/best_params_win.pickle": local_paths.MODEL_DIR / "best_params_win.pickle",
 }
 
-ALL_FILES = {**PREDICT_FILES, **DATA_FILES}
+# シミュレーション結果（管理者パネルでの表示用）
+RESULTS_FILES = {
+    "results/simulation_summary.csv": local_paths.RESULTS_DIR / "simulation_summary.csv",
+    "results/tansho_return_rate.png": local_paths.RESULTS_DIR / "tansho_return_rate.png",
+    "results/return_rate_vs_nbets.png": local_paths.RESULTS_DIR / "return_rate_vs_nbets.png",
+    "results/sharpe_ratio.png": local_paths.RESULTS_DIR / "sharpe_ratio.png",
+    "results/umaren_box_return_rate.png": local_paths.RESULTS_DIR / "umaren_box_return_rate.png",
+    "results/ev_tansho_return_rate.png": local_paths.RESULTS_DIR / "ev_tansho_return_rate.png",
+    "results/kelly_vs_flat_return.png": local_paths.RESULTS_DIR / "kelly_vs_flat_return.png",
+}
+
+ALL_FILES = {**PREDICT_FILES, **DATA_FILES, **RESULTS_FILES}
 
 
 def _load_secrets_toml() -> dict:

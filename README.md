@@ -88,12 +88,44 @@ streamlit run streamlit_app.py
 
 ## モデル・データを更新したとき
 
-ローカルで `main.py`（データ更新）や `train_model.py`（再学習）を実行した後、
-反映方法は2通りあります（どちらでも可）:
+反映方法は3通りあります（どれでも可）:
 
-- **クラウド経由（推奨）**: `python sync_data.py upload` → 公開アプリの再起動時に自動反映
+- **管理者パネルから（推奨）**: 「🔁 パイプライン実行」でGitHub Actions上で
+  データ更新〜学習〜シミュレーション〜クラウド保存まで全自動実行
+- **ローカル＋クラウド経由**: `python main.py` 等を実行後 `python sync_data.py upload`
+  → 公開アプリの再起動時に自動反映
   （すぐ反映したい場合は管理者パネルの「クラウドの最新モデルを取り込む」）
 - **Git経由**: `git add model data/processed/predict_meta.pickle && git commit && git push`
+
+## パイプラインのリモート実行（GitHub Actions）
+
+管理者パネルの「🔁 パイプライン実行」から、データ更新（期間指定可）・モデル学習
+（Optuna試行回数指定可）・シミュレーションを、GitHub Actionsのクラウド実行環境
+（メモリ16GB・1ジョブ最長約6時間）で実行できます。データの受け渡しは
+Hugging Face Hub 経由で全自動です。
+
+### 初回セットアップ
+
+1. **GitHubリポジトリのSecrets設定**（Actions実行時にHFへアクセスするため）
+   - リポジトリページ → Settings → Secrets and variables → **Actions** → New repository secret
+   - `HF_TOKEN` と `HF_REPO_ID` の2つを登録（値は `.streamlit/secrets.toml` と同じ）
+2. **GitHubのFine-grainedトークン作成**（アプリからActionsを起動するため）
+   - https://github.com/settings/personal-access-tokens → Generate new token
+   - Repository access: 対象リポジトリのみ選択
+   - Permissions → Repository permissions → **Actions: Read and write**
+3. **Streamlit CloudのSecretsに追加**
+   ```toml
+   GH_TOKEN = "github_pat_..."
+   GH_REPO  = "ユーザー名/keiba-ai-predict"
+   ```
+
+### 注意
+
+- 学習（試行回数200）は数時間かかります。6時間の上限を超えそうな場合は
+  試行回数を減らしてください。
+- GitHubの無料枠は**プライベートリポジトリで月2,000分**です（パブリックは無制限）。
+- GitHubのデータセンターIPからのスクレイピングがnetkeiba側にブロックされる
+  可能性があります。初回実行で失敗する場合はローカル実行に切り替えてください。
 
 ## 注意事項
 

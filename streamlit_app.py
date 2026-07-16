@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 
 import cloud_storage
@@ -201,6 +202,60 @@ def render_predict() -> None:
 
 
 # ---------------------------------------------------------------------------
+# GitHub Actions 連携（パイプラインのリモート実行）
+# ---------------------------------------------------------------------------
+GH_WORKFLOW_FILE = "pipeline.yml"
+
+
+def gh_config() -> tuple[str, str]:
+    """(token, "owner/repo") を返す。未設定の項目は空文字。"""
+    token = st.secrets.get("GH_TOKEN", "")
+    repo = st.secrets.get("GH_REPO", "")
+    return token, repo
+
+
+def gh_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def gh_dispatch_pipeline(inputs: dict) -> tuple[bool, str]:
+    """workflow_dispatch でパイプラインを起動する。"""
+    token, repo = gh_config()
+    url = (f"https://api.github.com/repos/{repo}/actions/workflows/"
+           f"{GH_WORKFLOW_FILE}/dispatches")
+    res = requests.post(
+        url, headers=gh_headers(token),
+        json={"ref": "main", "inputs": inputs}, timeout=30,
+    )
+    if res.status_code == 204:
+        return True, "起動しました"
+    return False, f"HTTP {res.status_code}: {res.text[:300]}"
+
+
+def gh_recent_runs(limit: int = 5) -> list[dict]:
+    """パイプラインの直近の実行履歴を返す。"""
+    token, repo = gh_config()
+    url = (f"https://api.github.com/repos/{repo}/actions/workflows/"
+           f"{GH_WORKFLOW_FILE}/runs")
+    res = requests.get(url, headers=gh_headers(token),
+                       params={"per_page": limit}, timeout=30)
+    res.raise_for_status()
+    runs = []
+    for r in res.json().get("workflow_runs", []):
+        runs.append({
+            "開始時刻(UTC)": r["created_at"].replace("T", " ").replace("Z", ""),
+            "状態": r["status"],
+            "結果": r["conclusion"] or "-",
+            "URL": r["html_url"],
+        })
+    return runs
+
+
+# ---------------------------------------------------------------------------
 # 管理者パネル
 # ---------------------------------------------------------------------------
 # アップロードを受け付けるファイル名 → 保存先
@@ -310,10 +365,119 @@ def render_admin() -> None:
             st.error(f"対応外のファイル名のためスキップ: {', '.join(rejected)}")
 
     st.markdown("---")
+
+    # --- パイプラインのリモート実行 (GitHub Actions) ---
+    st.markdown("**🔁 パイプライン実行（GitHub Actions）**")
+    gh_token, gh_repo = gh_config()
+    if not (gh_token and gh_repo):
+        st.warning(
+            "GitHub Actions 連携が未設定です。Secrets に `GH_TOKEN`"
+            "（GitHubのFine-grainedトークン: 対象リポジトリの Actions Read/Write 権限）と "
+            "`GH_REPO`（例: `niida920214/keiba-ai-predict`）を追加すると、"
+            "データ更新・学習・シミュレーションをここから実行できます。"
+        )
+    else:
+        st.caption(
+            f"実行環境: GitHub Actions（`{gh_repo}`、メモリ16GB・最長約6時間）。"
+            "データはクラウドストレージから取得し、完了後に自動でクラウドへ保存されます。"
+        )
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            do_update = st.checkbox("① データ更新 (main.py)", value=True)
+        with col2:
+            do_train = st.checkbox("② モデル学習 (train_model.py)", value=False)
+        with col3:
+            do_simulate = st.checkbox("③ シミュレーション (simulate.py)", value=False)
+
+        with st.expander("詳細オプション"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                from_date = st.text_input("取得開始年月 (yyyy-mm)", value="",
+                                          placeholder="空欄=2016-01")
+            with col2:
+                to_date = st.text_input("取得終了年月 (yyyy-mm)", value="",
+                                        placeholder="空欄=今月")
+            with col3:
+                trials = st.number_input("Optuna試行回数", min_value=10,
+                                         max_value=500, value=200, step=10)
+            if do_train:
+                st.caption(
+                    "⚠ 学習は試行回数200で数時間かかります。GitHub Actionsの上限"
+                    "（1ジョブ約6時間）を超えそうな場合は試行回数を減らしてください。"
+                )
+
+        if st.button("🚀 パイプラインを起動", type="primary",
+                     disabled=not (do_update or do_train or do_simulate)):
+            ok, msg = gh_dispatch_pipeline({
+                "run_update": do_update,
+                "run_train": do_train,
+                "run_simulate": do_simulate,
+                "from_date": from_date.strip(),
+                "to_date": to_date.strip(),
+                "trials": str(int(trials)),
+            })
+            if ok:
+                st.success(
+                    "パイプラインを起動しました。進行状況は下の実行履歴"
+                    "（反映まで数秒かかります）で確認できます。"
+                    "完了後は「クラウドの最新モデルを取り込む」で反映してください。"
+                )
+            else:
+                st.error(f"起動に失敗しました: {msg}")
+
+        if st.button("🔄 実行履歴を更新"):
+            pass  # ボタン押下でrerunされ、下の履歴が再取得される
+
+        try:
+            runs = gh_recent_runs()
+            if runs:
+                st.dataframe(
+                    pd.DataFrame(runs), width="stretch", hide_index=True,
+                    column_config={"URL": st.column_config.LinkColumn("ログ")},
+                )
+            else:
+                st.caption("実行履歴はまだありません。")
+        except Exception as e:
+            st.error(f"実行履歴の取得に失敗しました: {e}")
+
+    st.markdown("---")
+
+    # --- シミュレーション結果の表示 ---
+    st.markdown("**📊 シミュレーション結果**")
+    if cloud_storage.is_configured():
+        if st.button("クラウドから最新の結果を取得して表示"):
+            try:
+                with st.spinner("取得中..."):
+                    cloud_storage.download_files(
+                        cloud_storage.RESULTS_FILES, log=lambda _: None
+                    )
+                st.session_state["show_sim_results"] = True
+            except Exception as e:
+                st.error(f"取得に失敗しました: {e}")
+        if st.session_state.get("show_sim_results"):
+            summary_path = local_paths.RESULTS_DIR / "simulation_summary.csv"
+            if summary_path.exists() and summary_path.stat().st_size > 0:
+                try:
+                    st.dataframe(pd.read_csv(summary_path), width="stretch")
+                except Exception:
+                    pass
+            cols = st.columns(2)
+            shown = 0
+            for remote, path in cloud_storage.RESULTS_FILES.items():
+                if path.suffix == ".png" and path.exists():
+                    with cols[shown % 2]:
+                        st.image(str(path), caption=path.name)
+                    shown += 1
+            if shown == 0:
+                st.caption("表示できる結果画像がまだありません（シミュレーション未実行）。")
+    else:
+        st.caption("クラウドストレージ設定後に利用できます。")
+
+    st.markdown("---")
     st.caption(
-        "データ更新（スクレイピング）とモデル再学習は計算資源の都合でローカル専用です。"
-        "ローカルで `python main.py` → `python train_model.py` を実行後、"
-        "`python sync_data.py upload` でクラウドに保存してください。"
+        "パイプラインはローカルでも実行できます: `python main.py` → "
+        "`python train_model.py` → `python simulate.py` → `python sync_data.py upload`"
     )
 
 

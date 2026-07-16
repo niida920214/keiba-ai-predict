@@ -30,9 +30,10 @@ from scraper import scrape_kaisai_date, scrape_race_id_list, update_data
 # ---------------------------------------------------------------------------
 DATA_DIR = local_paths.DATA_DIR
 
-# ★ 取得期間: 開始は固定、終了は現在の年月を自動使用
-FROM_DATE = "2016-01"
-TO_DATE = datetime.now().strftime("%Y-%m")
+# ★ 取得期間のデフォルト: 開始は固定、終了は現在の年月を自動使用
+#    （--from-date / --to-date 引数で上書き可能）
+DEFAULT_FROM_DATE = "2016-01"
+DEFAULT_TO_DATE = datetime.now().strftime("%Y-%m")
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +64,14 @@ def main() -> None:
                         help="壊れた horse_results を削除して Ajax API から再取得する")
     parser.add_argument("--clean-all", action="store_true",
                         help="全 raw データ・processed データを削除して完全再取得する")
+    parser.add_argument("--from-date", default=DEFAULT_FROM_DATE,
+                        help=f"取得開始年月 yyyy-mm（デフォルト: {DEFAULT_FROM_DATE}）")
+    parser.add_argument("--to-date", default=DEFAULT_TO_DATE,
+                        help="取得終了年月 yyyy-mm（デフォルト: 現在の年月）")
     args = parser.parse_args()
+
+    FROM_DATE = args.from_date
+    TO_DATE = args.to_date
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print(f"データ保存先: {DATA_DIR}")

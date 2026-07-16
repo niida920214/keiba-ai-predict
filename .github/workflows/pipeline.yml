@@ -1,0 +1,77 @@
+name: keiba-pipeline
+
+# 管理者パネル（streamlit_app.py）またはGitHubのActionsタブから手動起動する。
+# データはHugging Face Hubと同期: 開始時にダウンロード → 処理 → 終了時にアップロード。
+on:
+  workflow_dispatch:
+    inputs:
+      run_update:
+        description: "データ更新 (main.py) を実行する"
+        type: boolean
+        default: true
+      run_train:
+        description: "モデル学習 (train_model.py) を実行する"
+        type: boolean
+        default: false
+      run_simulate:
+        description: "シミュレーション (simulate.py) を実行する"
+        type: boolean
+        default: false
+      from_date:
+        description: "取得開始年月 yyyy-mm（空欄=デフォルト 2016-01）"
+        type: string
+        default: ""
+      to_date:
+        description: "取得終了年月 yyyy-mm（空欄=現在の年月）"
+        type: string
+        default: ""
+      trials:
+        description: "Optuna試行回数の基準値（学習時のみ使用）"
+        type: string
+        default: "200"
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # 上限6時間の少し手前で打ち切り
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
+          pip install --quiet -r requirements.txt
+
+      - name: Download data from Hugging Face
+        run: python sync_data.py download
+
+      - name: Run data update (main.py)
+        if: ${{ inputs.run_update }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.from_date }}" ]; then ARGS="$ARGS --from-date ${{ inputs.from_date }}"; fi
+          if [ -n "${{ inputs.to_date }}" ]; then ARGS="$ARGS --to-date ${{ inputs.to_date }}"; fi
+          python main.py $ARGS
+
+      - name: Run training (train_model.py)
+        if: ${{ inputs.run_train }}
+        run: python train_model.py --trials "${{ inputs.trials }}"
+
+      - name: Run simulation (simulate.py)
+        if: ${{ inputs.run_simulate }}
+        run: python simulate.py
+
+      - name: Upload results to Hugging Face
+        if: ${{ always() && !cancelled() }}
+        run: python sync_data.py upload

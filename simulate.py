@@ -20,7 +20,11 @@ from modules.constants import local_paths
 from modules.constants.features import EXCLUDE_COLS
 from train_model import split_data
 
-plt.rcParams["font.family"] = "MS Gothic"
+# Windows は MS Gothic、Linux (GitHub Actions等) は Noto Sans CJK にフォールバック
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = [
+    "MS Gothic", "Noto Sans CJK JP", "IPAGothic", "DejaVu Sans",
+]
 
 
 # ---------------------------------------------------------------------------

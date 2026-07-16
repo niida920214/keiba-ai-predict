@@ -325,6 +325,14 @@ def train_and_calibrate(
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="LightGBM モデル学習 & Optuna チューニング")
+    parser.add_argument(
+        "--trials", type=int, default=200,
+        help="Optuna 試行回数の基準値（デフォルト 200。Win/Ranker モデルは比例配分）",
+    )
+    args = parser.parse_args()
+
     local_paths.MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -381,7 +389,7 @@ def main() -> None:
     print(f"  X_train: {X_train.shape}, X_valid: {X_valid.shape}, X_test: {X_test.shape}")
 
     # --- Optuna ハイパーパラメータチューニング ---
-    N_TRIALS = 200
+    N_TRIALS = args.trials
     print(f"\n[5] Optuna チューニング開始 ({N_TRIALS} trials) ...")
 
     study = optuna.create_study(
@@ -451,7 +459,7 @@ def main() -> None:
         # Top3モデルのパラメータを流用 + scale_pos_weight
         win_extra_params = {"scale_pos_weight": spw}
 
-        N_TRIALS_WIN = 100
+        N_TRIALS_WIN = max(1, args.trials // 2)
         print(f"\n[6] Win Model Optuna ({N_TRIALS_WIN} trials) ...")
 
         study_win = optuna.create_study(
@@ -549,7 +557,7 @@ def main() -> None:
         print(f"    test:  スコア平均={y_rank_test.mean():.3f}, グループ数={len(group_test)}")
 
         # --- Optuna チューニング (Ranker) ---
-        N_TRIALS_RANK = 150
+        N_TRIALS_RANK = max(1, args.trials * 3 // 4)
         print(f"\n[7] Ranker Optuna ({N_TRIALS_RANK} trials) ...")
 
         study_rank = optuna.create_study(
