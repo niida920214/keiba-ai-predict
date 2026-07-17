@@ -465,25 +465,21 @@ UPLOADABLE_FILES = {
 }
 
 
+def _import_latest_from_cloud() -> str:
+    """クラウドの最新モデル・データを取り込む。"""
+    downloaded = cloud_storage.download_files(
+        cloud_storage.PREDICT_FILES, log=lambda _: None
+    )
+    return f"{len(downloaded)} ファイルを取り込みました。以後の予測に反映されます。"
+
+
 def render_admin() -> None:
     st.subheader("🛠 管理者パネル")
 
-    # --- 現在有効なモデルの状態 ---
-    st.markdown("**現在有効なモデル・データ**")
-    rows = []
-    for name, path in UPLOADABLE_FILES.items():
-        if path.exists():
-            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            rows.append({"ファイル": name, "更新日時": mtime,
-                         "サイズ(MB)": round(path.stat().st_size / 1024 / 1024, 2)})
-        else:
-            rows.append({"ファイル": name, "更新日時": "（なし）", "サイズ(MB)": None})
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-    st.markdown("---")
-
-    # --- クラウドストレージ ---
-    st.markdown("**クラウドストレージ（Hugging Face Hub）**")
+    # ================================================================
+    # 1. クラウドストレージ（Hugging Face Hub）
+    # ================================================================
+    st.markdown("**☁️ クラウドストレージ（Hugging Face Hub）**")
     if cloud_storage.is_configured():
         _, repo_id = cloud_storage.get_config()
         st.success(f"接続設定済み: `{repo_id}`（非公開）")
@@ -493,10 +489,8 @@ def render_admin() -> None:
             if st.button("⬇ クラウドの最新モデルを取り込む"):
                 try:
                     with st.spinner("ダウンロード中..."):
-                        downloaded = cloud_storage.download_files(
-                            cloud_storage.PREDICT_FILES, log=lambda _: None
-                        )
-                    st.success(f"{len(downloaded)} ファイルを取り込みました。以後の予測に反映されます。")
+                        msg = _import_latest_from_cloud()
+                    st.success(msg)
                 except Exception as e:
                     st.error(f"取り込みに失敗しました: {e}")
         with col2:
@@ -515,54 +509,25 @@ def render_admin() -> None:
 
     st.markdown("---")
 
-    # --- モデルのアップロード ---
-    st.markdown("**新しいモデル・データのアップロード**")
-    st.caption(
-        "ローカルで学習した `model/*.pickle` や `predict_meta.pickle` をここから反映できます。"
-        "対応ファイル名: " + ", ".join(f"`{n}`" for n in UPLOADABLE_FILES)
-    )
-    uploads = st.file_uploader(
-        "ファイルを選択（複数可）", accept_multiple_files=True, key="admin_uploads"
-    )
-    if uploads and st.button("⬆ アップロードして反映", type="primary"):
-        applied, rejected = [], []
-        for up in uploads:
-            dest = UPLOADABLE_FILES.get(up.name)
-            if dest is None:
-                rejected.append(up.name)
-                continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(up.getbuffer())
-            applied.append(up.name)
-
-        if applied:
-            st.success(f"反映しました: {', '.join(applied)}")
-            if cloud_storage.is_configured():
-                try:
-                    with st.spinner("クラウドストレージへ保存中..."):
-                        cloud_storage.upload_files(
-                            {f"model/{n}" if "meta" not in n
-                             else f"data/processed/{n}": UPLOADABLE_FILES[n]
-                             for n in applied},
-                            log=lambda _: None,
-                        )
-                    st.success("クラウドにも保存しました（次回起動時以降も維持されます）。")
-                except Exception as e:
-                    st.error(
-                        f"クラウド保存に失敗: {e}\n"
-                        "※ このままだとアプリ再起動時に元のモデルへ戻ります。"
-                    )
-            else:
-                st.warning(
-                    "クラウド未設定のため、この反映はアプリ再起動までの一時的なものです。"
-                    "恒久反映には git push か、クラウドストレージの設定が必要です。"
-                )
-        if rejected:
-            st.error(f"対応外のファイル名のためスキップ: {', '.join(rejected)}")
+    # ================================================================
+    # 2. 現在有効なモデル・データ
+    # ================================================================
+    st.markdown("**現在有効なモデル・データ**")
+    rows = []
+    for name, path in UPLOADABLE_FILES.items():
+        if path.exists():
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            rows.append({"ファイル": name, "更新日時": mtime,
+                         "サイズ(MB)": round(path.stat().st_size / 1024 / 1024, 2)})
+        else:
+            rows.append({"ファイル": name, "更新日時": "（なし）", "サイズ(MB)": None})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     st.markdown("---")
 
-    # --- パイプラインのリモート実行 (GitHub Actions) ---
+    # ================================================================
+    # 3. パイプライン実行 (GitHub Actions)
+    # ================================================================
     st.markdown("**🔁 パイプライン実行（GitHub Actions）**")
     gh_token, gh_repo = gh_config()
     if not (gh_token and gh_repo):
@@ -577,6 +542,11 @@ def render_admin() -> None:
             f"実行環境: GitHub Actions（`{gh_repo}`、メモリ16GB・最長約6時間）。"
             "データはクラウドストレージから取得し、完了後に自動でクラウドへ保存されます。"
         )
+
+        # 直前の操作結果（起動・取り込み）をrerun後にも表示する
+        flash = st.session_state.pop("flash_pipeline", None)
+        if flash:
+            st.success(flash)
 
         # 実行状況を先に取得（起動ボタンの活性制御に使う）
         runs, runs_error = [], None
@@ -662,11 +632,12 @@ def render_admin() -> None:
             })
             if ok:
                 st.session_state["pipeline_launched_at"] = time.time()
-                st.success(
-                    "パイプラインを起動しました。進行状況は下の実行履歴"
-                    "（反映まで数秒かかります）で確認できます。"
-                    "完了後は「クラウドの最新モデルを取り込む」で反映してください。"
+                st.session_state["flash_pipeline"] = (
+                    "🚀 パイプラインを起動しました。進行状況は下の実行履歴で確認できます"
+                    "（GitHubへの反映まで数十秒かかることがあります）。"
                 )
+                # 即座に再描画して起動ボタンをロック状態にする
+                st.rerun()
             else:
                 st.error(f"起動に失敗しました: {msg}")
 
@@ -701,6 +672,28 @@ def render_admin() -> None:
                 df_runs, width="stretch", hide_index=True,
                 column_config={"Log": st.column_config.LinkColumn("Log")},
             )
+
+            # --- 次のステップ: 完了した成果の取り込み ---
+            latest = runs[0]
+            if (active is None
+                    and "success" in str(latest["Result"])
+                    and st.session_state.get("imported_for_run") != latest["id"]
+                    and cloud_storage.is_configured()):
+                st.success(
+                    "✅ 最新のパイプラインは完了しています。"
+                    "**次のステップ**: 下のボタンで成果を取り込むと、"
+                    "予測と Recommended run に反映されます。"
+                )
+                if st.button("⬇ 完了した成果（最新モデル・データ）を取り込んで反映する",
+                             type="primary", key="import_after_run"):
+                    try:
+                        with st.spinner("取り込み中..."):
+                            msg = _import_latest_from_cloud()
+                        st.session_state["imported_for_run"] = latest["id"]
+                        st.session_state["flash_pipeline"] = f"✅ {msg}"
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"取り込みに失敗しました: {e}")
         else:
             st.caption("実行履歴はまだありません。")
 
@@ -769,6 +762,56 @@ def render_admin() -> None:
                 st.caption("表示できる結果画像がまだありません（シミュレーション未実行）。")
     else:
         st.caption("クラウドストレージ設定後に利用できます。")
+
+    st.markdown("---")
+
+    # ================================================================
+    # 6. 新しいモデル・データのアップロード（手動・通常運用では不要）
+    # ================================================================
+    st.markdown("**⬆ 新しいモデル・データのアップロード**")
+    st.caption(
+        "ローカルで学習した `model/*.pickle` や `predict_meta.pickle` を手動で反映したいとき用。"
+        "通常はパイプライン実行が自動で行うため使いません。"
+        "対応ファイル名: " + ", ".join(f"`{n}`" for n in UPLOADABLE_FILES)
+    )
+    uploads = st.file_uploader(
+        "ファイルを選択（複数可）", accept_multiple_files=True, key="admin_uploads"
+    )
+    if uploads and st.button("⬆ アップロードして反映"):
+        applied, rejected = [], []
+        for up in uploads:
+            dest = UPLOADABLE_FILES.get(up.name)
+            if dest is None:
+                rejected.append(up.name)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(up.getbuffer())
+            applied.append(up.name)
+
+        if applied:
+            st.success(f"反映しました: {', '.join(applied)}")
+            if cloud_storage.is_configured():
+                try:
+                    with st.spinner("クラウドストレージへ保存中..."):
+                        cloud_storage.upload_files(
+                            {f"model/{n}" if "meta" not in n
+                             else f"data/processed/{n}": UPLOADABLE_FILES[n]
+                             for n in applied},
+                            log=lambda _: None,
+                        )
+                    st.success("クラウドにも保存しました（次回起動時以降も維持されます）。")
+                except Exception as e:
+                    st.error(
+                        f"クラウド保存に失敗: {e}\n"
+                        "※ このままだとアプリ再起動時に元のモデルへ戻ります。"
+                    )
+            else:
+                st.warning(
+                    "クラウド未設定のため、この反映はアプリ再起動までの一時的なものです。"
+                    "恒久反映には git push か、クラウドストレージの設定が必要です。"
+                )
+        if rejected:
+            st.error(f"対応外のファイル名のためスキップ: {', '.join(rejected)}")
 
     st.markdown("---")
     st.caption(
