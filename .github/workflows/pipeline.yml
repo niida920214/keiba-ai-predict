@@ -30,6 +30,11 @@ on:
         type: string
         default: "200"
 
+# 同時実行を禁止: 実行中に新たに起動された場合はキュー（順番待ち）になる
+concurrency:
+  group: keiba-pipeline
+  cancel-in-progress: false
+
 jobs:
   pipeline:
     runs-on: ubuntu-latest

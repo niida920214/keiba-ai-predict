@@ -474,6 +474,19 @@ def render_admin() -> None:
             "データはクラウドストレージから取得し、完了後に自動でクラウドへ保存されます。"
         )
 
+        # 実行状況を先に取得（起動ボタンの活性制御に使う）
+        runs, runs_error = [], None
+        try:
+            runs = gh_recent_runs()
+        except Exception as e:
+            runs_error = str(e)
+        active = next((r for r in runs if r["_status"] != "completed"), None)
+        # 起動直後はAPIにまだ反映されないため、90秒間は起動済み扱いにする
+        recently_launched = (
+            time.time() - st.session_state.get("pipeline_launched_at", 0.0) < 90
+        )
+        launch_blocked = active is not None or recently_launched
+
         col1, col2, col3 = st.columns(3)
         with col1:
             do_update = st.checkbox("① データ更新 (main.py)", value=True)
@@ -499,8 +512,11 @@ def render_admin() -> None:
                     "（1ジョブ約6時間）を超えそうな場合は試行回数を減らしてください。"
                 )
 
+        if launch_blocked:
+            st.caption("⏳ パイプラインが実行中のため、完了するまで新しい起動はできません。")
+
         if st.button("🚀 パイプラインを起動", type="primary",
-                     disabled=not (do_update or do_train or do_simulate)):
+                     disabled=launch_blocked or not (do_update or do_train or do_simulate)):
             ok, msg = gh_dispatch_pipeline({
                 "run_update": do_update,
                 "run_train": do_train,
@@ -510,6 +526,7 @@ def render_admin() -> None:
                 "trials": str(int(trials)),
             })
             if ok:
+                st.session_state["pipeline_launched_at"] = time.time()
                 st.success(
                     "パイプラインを起動しました。進行状況は下の実行履歴"
                     "（反映まで数秒かかります）で確認できます。"
@@ -519,37 +536,34 @@ def render_admin() -> None:
                 st.error(f"起動に失敗しました: {msg}")
 
         if st.button("🔄 実行履歴・進捗を更新"):
-            pass  # ボタン押下でrerunされ、下の履歴が再取得される
+            pass  # ボタン押下でrerunされ、上部で履歴が再取得される
 
-        try:
-            runs = gh_recent_runs()
-            if runs:
-                # 実行中のrunがあればステップ単位の進捗を表示
-                active = next((r for r in runs if r["_status"] != "completed"), None)
-                if active:
-                    st.markdown(
-                        f"**Progress** — started {active['Started (JST)']} (JST) / "
-                        f"elapsed {active['Elapsed']}"
-                    )
-                    try:
-                        steps = gh_run_steps(active["id"])
-                        for s in steps:
-                            st.markdown(f"{s['icon']} {s['name']}")
-                        if not steps:
-                            st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
-                    except Exception:
-                        st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
-                    st.caption("※ この画面は自動更新されません。「🔄 実行履歴・進捗を更新」で最新化してください。")
-
-                df_runs = pd.DataFrame(runs).drop(columns=["id", "_status"])
-                st.dataframe(
-                    df_runs, width="stretch", hide_index=True,
-                    column_config={"Log": st.column_config.LinkColumn("Log")},
+        if runs_error:
+            st.error(f"実行履歴の取得に失敗しました: {runs_error}")
+        elif runs:
+            # 実行中のrunがあればステップ単位の進捗を表示
+            if active:
+                st.markdown(
+                    f"**Progress** — started {active['Started (JST)']} (JST) / "
+                    f"elapsed {active['Elapsed']}"
                 )
-            else:
-                st.caption("実行履歴はまだありません。")
-        except Exception as e:
-            st.error(f"実行履歴の取得に失敗しました: {e}")
+                try:
+                    steps = gh_run_steps(active["id"])
+                    for s in steps:
+                        st.markdown(f"{s['icon']} {s['name']}")
+                    if not steps:
+                        st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
+                except Exception:
+                    st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
+                st.caption("※ この画面は自動更新されません。「🔄 実行履歴・進捗を更新」で最新化してください。")
+
+            df_runs = pd.DataFrame(runs).drop(columns=["id", "_status"])
+            st.dataframe(
+                df_runs, width="stretch", hide_index=True,
+                column_config={"Log": st.column_config.LinkColumn("Log")},
+            )
+        else:
+            st.caption("実行履歴はまだありません。")
 
     st.markdown("---")
 
