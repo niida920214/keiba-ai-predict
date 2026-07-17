@@ -372,6 +372,41 @@ def _add_months(ym: str, n: int) -> str:
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
 
 
+def get_tuning_counts() -> dict[str, int]:
+    """Optunaの累積試行回数（study別・完了分のみ）を返す。
+
+    クラウド上の optuna_study.db を参照（未設定・失敗時はローカル）。
+    """
+    import sqlite3
+
+    db_path = local_paths.BASE_DIR / "optuna_study.db"
+    if cloud_storage.is_configured():
+        try:
+            from huggingface_hub import hf_hub_download
+            token, repo_id = cloud_storage.get_config()
+            db_path = Path(hf_hub_download(
+                repo_id=repo_id, filename="optuna_study.db",
+                repo_type="dataset", token=token,
+            ))
+        except Exception:
+            pass
+    if not Path(db_path).exists():
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT s.study_name, COUNT(t.trial_id) FROM studies s "
+                "LEFT JOIN trials t ON s.study_id = t.study_id "
+                "AND t.state = 'COMPLETE' GROUP BY s.study_name"
+            ).fetchall()
+        finally:
+            con.close()
+        return dict(rows)
+    except Exception:
+        return {}
+
+
 def _step_outcome(v) -> str:
     """記録の段階情報から結果を取り出す（旧: 文字列 / 新: {outcome, min} 両対応）。"""
     if isinstance(v, dict):
@@ -624,35 +659,78 @@ def render_admin() -> None:
         st.session_state.setdefault("opt_from", "")
         st.session_state.setdefault("opt_to", "")
 
+        # 各段階の状況（チェックボックス下に表示する情報）
+        last_upd = next(
+            (r for r in run_log
+             if _step_outcome(r.get("steps", {}).get("update")) == "success"), None)
+        last_sim = next(
+            (r for r in run_log
+             if _step_outcome(r.get("steps", {}).get("simulate")) == "success"), None)
+        data_thr = last_upd.get("data_through", "-") if last_upd else None
+
         col1, col2, col3 = st.columns(3)
         with col1:
             do_update = st.checkbox("① データ更新 (main.py)", key="cb_update")
+            if data_thr and data_thr != "-":
+                try:
+                    days_old = (datetime.utcnow() + timedelta(hours=9)
+                                - datetime.strptime(data_thr, "%Y-%m-%d")).days
+                except ValueError:
+                    days_old = None
+                note = f"📦 保有データ: 2016-01 〜 {data_thr}"
+                if days_old is not None:
+                    note += ("（最新です。次の開催週末後に実行してください）"
+                             if days_old < 7 else f"（{days_old}日前・要更新）")
+                st.caption(note)
+            else:
+                st.caption("📦 保有データ: 実行記録なし")
         with col2:
             do_train = st.checkbox("② モデル学習 (train_model.py)", key="cb_train")
+            counts = get_tuning_counts()
+            n_top3 = counts.get("top3_study", 0)
+            n_win = counts.get("win_study", 0)
+            n_rank = counts.get("ranker_study", 0)
+            if n_top3 + n_win + n_rank > 0:
+                st.caption(
+                    f"🔁 累積チューニング: 計{n_top3 + n_win + n_rank}回"
+                    f"（Top3 {n_top3} / Win {n_win} / Ranker {n_rank}）。"
+                    "実行のたびに続きから積み上がります"
+                )
+            else:
+                st.caption("🔁 累積チューニング: 履歴なし")
         with col3:
             do_simulate = st.checkbox("③ シミュレーション (simulate.py)", key="cb_sim")
+            if last_sim:
+                st.caption(
+                    f"📈 最終検証: {last_sim.get('started_jst', '-')[:10]}。"
+                    "現行モデルの回収率をテスト期間で検証します（②とセット推奨）"
+                )
+            else:
+                st.caption("📈 まだ未検証。②の後に実行すると新モデルの回収率を確認できます")
 
         with st.expander("詳細オプション"):
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                from_date = st.text_input("取得開始年月 (yyyy-mm)", key="opt_from",
-                                          placeholder="空欄=2016-01")
-            with col2:
-                to_date = st.text_input("取得終了年月 (yyyy-mm)", key="opt_to",
-                                        placeholder="空欄=今月")
-            with col3:
-                trials = st.number_input("Optuna試行回数", min_value=10,
-                                         max_value=500, value=100, step=10)
-            st.caption(
-                "※ 取得期間は ① データ更新 のみに影響します。"
-                "②モデル学習・③シミュレーションは蓄積された全データを使うため、期間指定は無関係です。"
-            )
+            if do_update:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.text_input("取得開始年月 (yyyy-mm)", key="opt_from",
+                                  placeholder="空欄=2016-01")
+                with col2:
+                    st.text_input("取得終了年月 (yyyy-mm)", key="opt_to",
+                                  placeholder="空欄=今月")
+                st.caption("※ 取得期間は ① のみに影響します（②③は蓄積された全データを使用）。")
             if do_train:
+                st.number_input("Optuna試行回数", min_value=10, max_value=500,
+                                value=100, step=10, key="opt_trials")
                 st.caption(
-                    "⚠ 学習時間は試行回数にほぼ比例し、試行回数200では6時間制限を超えた実績があります。"
-                    "デフォルトの100を推奨。チューニング履歴はクラウドに引き継がれるため、"
-                    "実行を重ねるごとに探索が積み上がります。"
+                    "⚠ 学習時間は試行回数にほぼ比例し、200では6時間制限を超えた実績があります。"
+                    "デフォルトの100を推奨（履歴が引き継がれるため、実行を重ねれば探索は積み上がります）。"
                 )
+            if not (do_update or do_train):
+                st.caption("チェックした段階に応じたオプションがここに表示されます。")
+
+        from_date = st.session_state.get("opt_from", "") if do_update else ""
+        to_date = st.session_state.get("opt_to", "") if do_update else ""
+        trials = int(st.session_state.get("opt_trials", 100))
 
         operator = st.text_input(
             "実行者名（実行記録に残ります・必須）", max_chars=20,
