@@ -41,23 +41,32 @@ def data_through() -> str:
         return "-"
 
 
+def _step_info(outcome_key: str, dur_key: str) -> dict:
+    """段階の結果と所要時間（分）をまとめる。"""
+    info = {"outcome": os.environ.get(outcome_key, "skipped")}
+    dur = os.environ.get(dur_key, "")
+    if dur.isdigit():
+        info["min"] = int(dur)
+    return info
+
+
 def build_record() -> dict:
     start_ts = float(os.environ.get("START_TS", time.time()))
     started_jst = datetime.fromtimestamp(start_ts, timezone.utc) + timedelta(hours=9)
     elapsed_min = int((time.time() - start_ts) // 60)
 
-    outcomes = {
-        "update": os.environ.get("OUTCOME_UPDATE", "skipped"),
-        "train": os.environ.get("OUTCOME_TRAIN", "skipped"),
-        "simulate": os.environ.get("OUTCOME_SIM", "skipped"),
+    steps = {
+        "update": _step_info("OUTCOME_UPDATE", "DUR_UPDATE"),
+        "train": _step_info("OUTCOME_TRAIN", "DUR_TRAIN"),
+        "simulate": _step_info("OUTCOME_SIM", "DUR_SIM"),
     }
-    executed = [v for v in outcomes.values() if v != "skipped"]
+    executed = [s["outcome"] for s in steps.values() if s["outcome"] != "skipped"]
     overall = "failure" if "failure" in executed else ("success" if executed else "empty")
 
     return {
         "started_jst": started_jst.strftime("%Y-%m-%d %H:%M"),
         "operator": os.environ.get("OPERATOR", "") or "-",
-        "steps": outcomes,
+        "steps": steps,
         "result": overall,
         "elapsed_min": elapsed_min,
         "data_through": data_through(),

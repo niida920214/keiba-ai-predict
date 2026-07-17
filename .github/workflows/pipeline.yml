@@ -72,20 +72,28 @@ jobs:
         id: update
         if: ${{ inputs.run_update }}
         run: |
+          STEP_START=$(date -u +%s)
           ARGS=""
           if [ -n "${{ inputs.from_date }}" ]; then ARGS="$ARGS --from-date ${{ inputs.from_date }}"; fi
           if [ -n "${{ inputs.to_date }}" ]; then ARGS="$ARGS --to-date ${{ inputs.to_date }}"; fi
           python main.py $ARGS
+          echo "DUR_UPDATE=$(( ( $(date -u +%s) - STEP_START ) / 60 ))" >> "$GITHUB_ENV"
 
       - name: "Step 2: Train model (train_model.py)"
         id: train
         if: ${{ inputs.run_train }}
-        run: python train_model.py --trials "${{ inputs.trials }}"
+        run: |
+          STEP_START=$(date -u +%s)
+          python train_model.py --trials "${{ inputs.trials }}"
+          echo "DUR_TRAIN=$(( ( $(date -u +%s) - STEP_START ) / 60 ))" >> "$GITHUB_ENV"
 
       - name: "Step 3: Simulate (simulate.py)"
         id: simulate
         if: ${{ inputs.run_simulate }}
-        run: python simulate.py
+        run: |
+          STEP_START=$(date -u +%s)
+          python simulate.py
+          echo "DUR_SIM=$(( ( $(date -u +%s) - STEP_START ) / 60 ))" >> "$GITHUB_ENV"
 
       - name: Upload results to cloud
         if: ${{ always() && !cancelled() }}

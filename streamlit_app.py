@@ -329,6 +329,19 @@ RUN_LOG_REMOTE = "logs/run_history.jsonl"
 STEP_ICON = {"success": "✅", "failure": "❌", "skipped": "—"}
 
 
+def fmt_step_cell(v) -> str:
+    """実行記録の段階セルを整形する（旧: 文字列 / 新: {outcome, min} 両対応）。"""
+    if isinstance(v, dict):
+        outcome = v.get("outcome", "skipped")
+        if outcome == "skipped":
+            return "—"
+        cell = f"{STEP_ICON.get(outcome, '')} {outcome}"
+        if "min" in v:
+            cell += f" ({v['min']}min)"
+        return cell
+    return STEP_ICON.get(v, "—")
+
+
 def load_run_log() -> list[dict]:
     """クラウド上の永続実行記録を新しい順で返す。"""
     import json
@@ -430,7 +443,7 @@ def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
 
 
 def gh_run_steps(run_id: int) -> list[dict]:
-    """実行中ジョブのステップごとの進捗を返す。"""
+    """ジョブのステップごとの進捗・所要時間を返す（内部的なステップは除外）。"""
     token, repo = gh_config()
     url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
     res = requests.get(url, headers=gh_headers(token), timeout=30)
@@ -440,6 +453,9 @@ def gh_run_steps(run_id: int) -> list[dict]:
         return []
     steps = []
     for s in jobs[0].get("steps", []):
+        if s["name"].startswith(("Set up job", "Post ", "Complete job",
+                                 "Stop containers")):
+            continue
         if s["status"] == "completed":
             icon = {"success": "✅", "failure": "❌", "skipped": "⏭️"}.get(
                 s["conclusion"], "✅")
@@ -447,7 +463,21 @@ def gh_run_steps(run_id: int) -> list[dict]:
             icon = "🔄"
         else:
             icon = "⏳"
-        steps.append({"icon": icon, "name": s["name"], "status": s["status"]})
+
+        dur = ""
+        if s.get("started_at") and s["status"] in ("completed", "in_progress"):
+            start = datetime.strptime(s["started_at"], "%Y-%m-%dT%H:%M:%SZ")
+            end = (datetime.strptime(s["completed_at"], "%Y-%m-%dT%H:%M:%SZ")
+                   if s.get("completed_at") else datetime.utcnow())
+            mins = (end - start).total_seconds() / 60
+            if s["status"] == "in_progress":
+                dur = f" ({mins:.0f}min経過)"
+            elif s["conclusion"] == "skipped":
+                dur = ""
+            elif mins >= 1:
+                dur = f" ({mins:.0f}min)"
+        steps.append({"icon": icon, "name": s["name"], "status": s["status"],
+                      "dur": dur})
     return steps
 
 
@@ -647,20 +677,29 @@ def render_admin() -> None:
         if runs_error:
             st.error(f"実行履歴の取得に失敗しました: {runs_error}")
         elif runs:
-            # 実行中のrunがあればステップ単位の進捗を表示
-            if active:
+            # 最新の実行（1ループ分）のステップ進捗を常時表示する。
+            # 実行中はライブ進捗、完了後も次の実行が始まるまで結果を表示し続ける。
+            latest = runs[0]
+            is_running = latest["_status"] != "completed"
+            if is_running:
                 st.markdown(
-                    f"**Progress** — started {active['Started (JST)']} (JST) / "
-                    f"elapsed {active['Elapsed']}"
+                    f"**Progress** — started {latest['Started (JST)']} (JST) / "
+                    f"elapsed {latest['Elapsed']}"
                 )
-                try:
-                    steps = gh_run_steps(active["id"])
-                    for s in steps:
-                        st.markdown(f"{s['icon']} {s['name']}")
-                    if not steps:
-                        st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
-                except Exception:
-                    st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
+            else:
+                st.markdown(
+                    f"**Progress (last run)** — started {latest['Started (JST)']} (JST) / "
+                    f"elapsed {latest['Elapsed']} / {latest['Result']}"
+                )
+            try:
+                steps = gh_run_steps(latest["id"])
+                for s in steps:
+                    st.markdown(f"{s['icon']} {s['name']}{s['dur']}")
+                if not steps:
+                    st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
+            except Exception:
+                st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
+            if is_running:
                 st.caption(
                     "※ ⏳は「まだ到達していない」の意味で、実行予定とは限りません。"
                     "チェックを入れなかった段階は到達時に ⏭️（skipped）として飛ばされます。"
@@ -715,9 +754,9 @@ def render_admin() -> None:
                     rows.append({
                         "Started (JST)": r.get("started_jst", "-"),
                         "Operator": r.get("operator", "-"),
-                        "① Update": STEP_ICON.get(steps.get("update"), "—"),
-                        "② Train": STEP_ICON.get(steps.get("train"), "—"),
-                        "③ Simulate": STEP_ICON.get(steps.get("simulate"), "—"),
+                        "① Update": fmt_step_cell(steps.get("update")),
+                        "② Train": fmt_step_cell(steps.get("train")),
+                        "③ Simulate": fmt_step_cell(steps.get("simulate")),
                         "Result": r.get("result", "-"),
                         "Elapsed": f"{r.get('elapsed_min', '-')}min",
                         "Data through": r.get("data_through", "-"),
