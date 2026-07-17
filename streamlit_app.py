@@ -348,14 +348,27 @@ def load_run_log() -> list[dict]:
     return records[::-1]
 
 
+# 1回の①データ更新で安全に取り込める空白期間の上限（GitHub Actionsの6時間制限を考慮）
+MAX_UPDATE_MONTHS = 2
+
+
+def _add_months(ym: str, n: int) -> str:
+    """'yyyy-mm' に nヶ月を加算する。"""
+    y, m = int(ym[:4]), int(ym[5:7])
+    total = y * 12 + (m - 1) + n
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
 def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
-    """実行記録から「次におすすめの実行」を判定する。
+    """実行記録から「次におすすめの実行」と推奨取得期間を判定する。
 
     Returns
     -------
-    (メッセージ, チェック構成 or None)  — None は「今は実行不要」
+    (メッセージ, {update/train/simulate/from_date/to_date} or None)
+        None は「今は実行不要」
     """
     today_jst = datetime.utcnow() + timedelta(hours=9)
+    today_ym = today_jst.strftime("%Y-%m")
 
     last_update = next(
         (r for r in log if r.get("steps", {}).get("update") == "success"), None)
@@ -364,8 +377,12 @@ def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
 
     if not last_update or last_update.get("data_through", "-") == "-":
         return (
-            "実行記録がまだありません。まず ① データ更新 の実行をおすすめします。",
-            {"update": True, "train": False, "simulate": False},
+            "実行記録がまだありません。まず ① データ更新 の実行をおすすめします。"
+            "（初回は全期間が対象になるため数時間かかることがあります。"
+            f"6時間制限が不安な場合は、詳細オプションで期間を{MAX_UPDATE_MONTHS}ヶ月ずつに"
+            "区切って複数回に分けてください）",
+            {"update": True, "train": False, "simulate": False,
+             "from_date": "", "to_date": ""},
         )
 
     data_through = last_update["data_through"]
@@ -375,17 +392,34 @@ def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
         days_old = 999
 
     if days_old >= 7:
-        return (
+        # 6時間制限対策: データの空白を上限つきの期間で取りに行く
+        from_ym = data_through[:7]
+        to_ym = min(_add_months(from_ym, MAX_UPDATE_MONTHS), today_ym)
+        remaining = to_ym < today_ym
+
+        msg = (
             f"データは {data_through} 分まで（{days_old}日前）です。"
-            "最新の開催分を取り込むため ① データ更新 の実行をおすすめします。",
-            {"update": True, "train": False, "simulate": False},
+            f"① データ更新 をおすすめします。\n\n"
+            f"⏱ **推奨取得期間: {from_ym} 〜 {to_ym}**"
+            f"（6時間制限を考慮した1回あたり最大{MAX_UPDATE_MONTHS}ヶ月。"
+            "期間を絞ると開催カレンダーの再取得も短縮されます）"
         )
+        if remaining:
+            msg += (
+                f"\n\n⚠ 空白が大きいため1回では追いつきません。"
+                f"完了後、続き（{_add_months(to_ym, 1)} 〜）を同様に実行してください。"
+            )
+        return (msg, {"update": True, "train": False, "simulate": False,
+                      "from_date": from_ym, "to_date": to_ym})
 
     if not last_train or last_train["started_jst"] < last_update["started_jst"]:
         return (
             f"{data_through} までのデータが揃っています。"
-            "このデータに対して ② モデル学習 ＋ ③ シミュレーション の実行をおすすめします。",
-            {"update": False, "train": True, "simulate": True},
+            "このデータに対して ② モデル学習 ＋ ③ シミュレーション の実行をおすすめします。"
+            "（Optuna試行回数200なら2〜5時間で6時間制限内に収まる見込み。"
+            "不安な場合は詳細オプションで150以下に）",
+            {"update": False, "train": True, "simulate": True,
+             "from_date": "", "to_date": ""},
         )
 
     return (
@@ -567,15 +601,19 @@ def render_admin() -> None:
             rec_msg, rec_sel = recommend_next(run_log)
             st.info(f"💡 **Recommended run**: {rec_msg}")
             if rec_sel is not None:
-                if st.button("💡 おすすめの内容をチェックにセットする"):
+                if st.button("💡 おすすめの内容（チェック＋取得期間）をセットする"):
                     st.session_state["cb_update"] = rec_sel["update"]
                     st.session_state["cb_train"] = rec_sel["train"]
                     st.session_state["cb_sim"] = rec_sel["simulate"]
+                    st.session_state["opt_from"] = rec_sel.get("from_date", "")
+                    st.session_state["opt_to"] = rec_sel.get("to_date", "")
                     st.rerun()
 
         st.session_state.setdefault("cb_update", True)
         st.session_state.setdefault("cb_train", False)
         st.session_state.setdefault("cb_sim", False)
+        st.session_state.setdefault("opt_from", "")
+        st.session_state.setdefault("opt_to", "")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -588,10 +626,10 @@ def render_admin() -> None:
         with st.expander("詳細オプション"):
             col1, col2, col3 = st.columns(3)
             with col1:
-                from_date = st.text_input("取得開始年月 (yyyy-mm)", value="",
+                from_date = st.text_input("取得開始年月 (yyyy-mm)", key="opt_from",
                                           placeholder="空欄=2016-01")
             with col2:
-                to_date = st.text_input("取得終了年月 (yyyy-mm)", value="",
+                to_date = st.text_input("取得終了年月 (yyyy-mm)", key="opt_to",
                                         placeholder="空欄=今月")
             with col3:
                 trials = st.number_input("Optuna試行回数", min_value=10,
