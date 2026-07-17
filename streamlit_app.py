@@ -348,6 +348,53 @@ def load_run_log() -> list[dict]:
     return records[::-1]
 
 
+def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
+    """実行記録から「次におすすめの実行」を判定する。
+
+    Returns
+    -------
+    (メッセージ, チェック構成 or None)  — None は「今は実行不要」
+    """
+    today_jst = datetime.utcnow() + timedelta(hours=9)
+
+    last_update = next(
+        (r for r in log if r.get("steps", {}).get("update") == "success"), None)
+    last_train = next(
+        (r for r in log if r.get("steps", {}).get("train") == "success"), None)
+
+    if not last_update or last_update.get("data_through", "-") == "-":
+        return (
+            "実行記録がまだありません。まず ① データ更新 の実行をおすすめします。",
+            {"update": True, "train": False, "simulate": False},
+        )
+
+    data_through = last_update["data_through"]
+    try:
+        days_old = (today_jst - datetime.strptime(data_through, "%Y-%m-%d")).days
+    except ValueError:
+        days_old = 999
+
+    if days_old >= 7:
+        return (
+            f"データは {data_through} 分まで（{days_old}日前）です。"
+            "最新の開催分を取り込むため ① データ更新 の実行をおすすめします。",
+            {"update": True, "train": False, "simulate": False},
+        )
+
+    if not last_train or last_train["started_jst"] < last_update["started_jst"]:
+        return (
+            f"{data_through} までのデータが揃っています。"
+            "このデータに対して ② モデル学習 ＋ ③ シミュレーション の実行をおすすめします。",
+            {"update": False, "train": True, "simulate": True},
+        )
+
+    return (
+        f"データ（{data_through} まで）もモデルも最新です。"
+        "次の開催週末が終わったら ① データ更新 を実行してください。",
+        None,
+    )
+
+
 def gh_run_steps(run_id: int) -> list[dict]:
     """実行中ジョブのステップごとの進捗を返す。"""
     token, repo = gh_config()
@@ -510,13 +557,33 @@ def render_admin() -> None:
         )
         launch_blocked = active is not None or recently_launched
 
+        # --- Recommend run: 実行記録から次のおすすめを提示 ---
+        run_log = []
+        if cloud_storage.is_configured():
+            try:
+                run_log = load_run_log()
+            except Exception:
+                run_log = []
+            rec_msg, rec_sel = recommend_next(run_log)
+            st.info(f"💡 **Recommended run**: {rec_msg}")
+            if rec_sel is not None:
+                if st.button("💡 おすすめの内容をチェックにセットする"):
+                    st.session_state["cb_update"] = rec_sel["update"]
+                    st.session_state["cb_train"] = rec_sel["train"]
+                    st.session_state["cb_sim"] = rec_sel["simulate"]
+                    st.rerun()
+
+        st.session_state.setdefault("cb_update", True)
+        st.session_state.setdefault("cb_train", False)
+        st.session_state.setdefault("cb_sim", False)
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            do_update = st.checkbox("① データ更新 (main.py)", value=True)
+            do_update = st.checkbox("① データ更新 (main.py)", key="cb_update")
         with col2:
-            do_train = st.checkbox("② モデル学習 (train_model.py)", value=False)
+            do_train = st.checkbox("② モデル学習 (train_model.py)", key="cb_train")
         with col3:
-            do_simulate = st.checkbox("③ シミュレーション (simulate.py)", value=False)
+            do_simulate = st.checkbox("③ シミュレーション (simulate.py)", key="cb_sim")
 
         with st.expander("詳細オプション"):
             col1, col2, col3 = st.columns(3)
@@ -585,7 +652,11 @@ def render_admin() -> None:
                         st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
                 except Exception:
                     st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
-                st.caption("※ この画面は自動更新されません。「🔄 実行履歴・進捗を更新」で最新化してください。")
+                st.caption(
+                    "※ ⏳は「まだ到達していない」の意味で、実行予定とは限りません。"
+                    "チェックを入れなかった段階は到達時に ⏭️（skipped）として飛ばされます。"
+                    "この画面は自動更新されないので「🔄 実行履歴・進捗を更新」で最新化してください。"
+                )
 
             df_runs = pd.DataFrame(runs).drop(columns=["id", "_status"])
             st.dataframe(
