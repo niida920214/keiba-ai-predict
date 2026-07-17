@@ -372,6 +372,13 @@ def _add_months(ym: str, n: int) -> str:
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
 
 
+def _step_outcome(v) -> str:
+    """記録の段階情報から結果を取り出す（旧: 文字列 / 新: {outcome, min} 両対応）。"""
+    if isinstance(v, dict):
+        return v.get("outcome", "skipped")
+    return v or "skipped"
+
+
 def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
     """実行記録から「次におすすめの実行」と推奨取得期間を判定する。
 
@@ -384,9 +391,11 @@ def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
     today_ym = today_jst.strftime("%Y-%m")
 
     last_update = next(
-        (r for r in log if r.get("steps", {}).get("update") == "success"), None)
+        (r for r in log
+         if _step_outcome(r.get("steps", {}).get("update")) == "success"), None)
     last_train = next(
-        (r for r in log if r.get("steps", {}).get("train") == "success"), None)
+        (r for r in log
+         if _step_outcome(r.get("steps", {}).get("train")) == "success"), None)
 
     if not last_update or last_update.get("data_through", "-") == "-":
         return (
