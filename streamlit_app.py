@@ -325,6 +325,29 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
     return runs
 
 
+RUN_LOG_REMOTE = "logs/run_history.jsonl"
+STEP_ICON = {"success": "✅", "failure": "❌", "skipped": "—"}
+
+
+def load_run_log() -> list[dict]:
+    """クラウド上の永続実行記録を新しい順で返す。"""
+    import json
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
+
+    token, repo_id = cloud_storage.get_config()
+    try:
+        cached = hf_hub_download(
+            repo_id=repo_id, filename=RUN_LOG_REMOTE,
+            repo_type="dataset", token=token,
+        )
+    except EntryNotFoundError:
+        return []
+    with open(cached, encoding="utf-8") as f:
+        records = [json.loads(ln) for ln in f if ln.strip()]
+    return records[::-1]
+
+
 def gh_run_steps(run_id: int) -> list[dict]:
     """実行中ジョブのステップごとの進捗を返す。"""
     token, repo = gh_config()
@@ -512,11 +535,17 @@ def render_admin() -> None:
                     "（1ジョブ約6時間）を超えそうな場合は試行回数を減らしてください。"
                 )
 
+        operator = st.text_input(
+            "実行者名（実行記録に残ります・必須）", max_chars=20,
+            placeholder="例: niida",
+        )
+
         if launch_blocked:
             st.caption("⏳ パイプラインが実行中のため、完了するまで新しい起動はできません。")
 
         if st.button("🚀 パイプラインを起動", type="primary",
-                     disabled=launch_blocked or not (do_update or do_train or do_simulate)):
+                     disabled=launch_blocked or not operator.strip()
+                     or not (do_update or do_train or do_simulate)):
             ok, msg = gh_dispatch_pipeline({
                 "run_update": do_update,
                 "run_train": do_train,
@@ -524,6 +553,7 @@ def render_admin() -> None:
                 "from_date": from_date.strip(),
                 "to_date": to_date.strip(),
                 "trials": str(int(trials)),
+                "operator": operator.strip(),
             })
             if ok:
                 st.session_state["pipeline_launched_at"] = time.time()
@@ -564,6 +594,39 @@ def render_admin() -> None:
             )
         else:
             st.caption("実行履歴はまだありません。")
+
+    st.markdown("---")
+
+    # --- 永続実行記録（クラウド保存・消えない） ---
+    st.markdown("**📒 実行記録（永続）**")
+    st.caption(
+        "パイプラインの実行ごとに1行ずつクラウドへ記録され、消えません。"
+        "「いつ・誰が・①〜③のどれを・何分で・データはいつまでの分か」が残ります。"
+    )
+    if cloud_storage.is_configured():
+        try:
+            log = load_run_log()
+            if log:
+                rows = []
+                for r in log:
+                    steps = r.get("steps", {})
+                    rows.append({
+                        "Started (JST)": r.get("started_jst", "-"),
+                        "Operator": r.get("operator", "-"),
+                        "① Update": STEP_ICON.get(steps.get("update"), "—"),
+                        "② Train": STEP_ICON.get(steps.get("train"), "—"),
+                        "③ Simulate": STEP_ICON.get(steps.get("simulate"), "—"),
+                        "Result": r.get("result", "-"),
+                        "Elapsed": f"{r.get('elapsed_min', '-')}min",
+                        "Data through": r.get("data_through", "-"),
+                    })
+                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            else:
+                st.caption("記録はまだありません（次回のパイプライン実行から記録されます）。")
+        except Exception as e:
+            st.error(f"実行記録の取得に失敗しました: {e}")
+    else:
+        st.caption("クラウドストレージ設定後に利用できます。")
 
     st.markdown("---")
 

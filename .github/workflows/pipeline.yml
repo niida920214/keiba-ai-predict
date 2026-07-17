@@ -29,6 +29,10 @@ on:
         description: "Optuna試行回数の基準値（学習時のみ使用）"
         type: string
         default: "200"
+      operator:
+        description: "実行者名（実行記録に残ります）"
+        type: string
+        default: ""
 
 # 同時実行を禁止: 実行中に新たに起動された場合はキュー（順番待ち）になる
 concurrency:
@@ -47,6 +51,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Mark start time
+        run: echo "START_TS=$(date -u +%s)" >> "$GITHUB_ENV"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -62,6 +69,7 @@ jobs:
         run: python sync_data.py download
 
       - name: "Step 1: Data update (main.py)"
+        id: update
         if: ${{ inputs.run_update }}
         run: |
           ARGS=""
@@ -70,13 +78,24 @@ jobs:
           python main.py $ARGS
 
       - name: "Step 2: Train model (train_model.py)"
+        id: train
         if: ${{ inputs.run_train }}
         run: python train_model.py --trials "${{ inputs.trials }}"
 
       - name: "Step 3: Simulate (simulate.py)"
+        id: simulate
         if: ${{ inputs.run_simulate }}
         run: python simulate.py
 
       - name: Upload results to cloud
         if: ${{ always() && !cancelled() }}
         run: python sync_data.py upload
+
+      - name: Record run history
+        if: ${{ always() && !cancelled() }}
+        env:
+          OPERATOR: ${{ inputs.operator }}
+          OUTCOME_UPDATE: ${{ steps.update.outcome }}
+          OUTCOME_TRAIN: ${{ steps.train.outcome }}
+          OUTCOME_SIM: ${{ steps.simulate.outcome }}
+        run: python record_run.py
