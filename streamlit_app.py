@@ -694,10 +694,11 @@ st.title("🏇 競馬AI レース予測")
 
 if role == "admin":
     st.caption(f"👑 管理者としてログイン中｜{sync_status}")
-    tab_predict, tab_admin = st.tabs(["🎯 レース予測", "🛠 管理者パネル"])
-    with tab_predict:
-        render_predict()
+    # 管理者は管理者パネルを先頭（デフォルト表示）にする
+    tab_admin, tab_predict = st.tabs(["🛠 管理者パネル", "🎯 レース予測"])
     with tab_admin:
         render_admin()
+    with tab_predict:
+        render_predict()
 else:
     render_predict()
