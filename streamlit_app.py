@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 import cloud_storage
 from modules.constants import local_paths
@@ -58,8 +59,50 @@ def startup_cloud_sync() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 二段階パスワード認証
+# 二段階パスワード認証（署名付きCookieでログイン状態を7日間維持）
 # ---------------------------------------------------------------------------
+AUTH_COOKIE = "keiba_auth"
+AUTH_COOKIE_DAYS = 7
+
+
+def _cookie_token(role: str) -> str:
+    """ロールに対応するパスワードから導出した署名トークン。"""
+    secret_key = "ADMIN_PASSWORD" if role == "admin" else "APP_PASSWORD"
+    pw = st.secrets.get(secret_key, "")
+    if not pw:
+        return ""
+    return hmac.new(pw.encode(), f"keiba-auth-{role}".encode(), "sha256").hexdigest()
+
+
+def _login_from_cookie() -> str | None:
+    """ブラウザのCookieに有効な署名があればロールを復元する。"""
+    try:
+        cookie = st.context.cookies.get(AUTH_COOKIE, "")
+    except Exception:
+        return None
+    if ":" not in cookie:
+        return None
+    role, token = cookie.split(":", 1)
+    if role in ("admin", "user"):
+        expected = _cookie_token(role)
+        if expected and hmac.compare_digest(token, expected):
+            return role
+    return None
+
+
+def issue_auth_cookie(role: str) -> None:
+    """ログイン成功時にブラウザへCookieを書き込む（再接続後もログイン維持）。"""
+    token = _cookie_token(role)
+    if not token:
+        return
+    max_age = AUTH_COOKIE_DAYS * 24 * 3600
+    components.html(
+        f"<script>document.cookie = '{AUTH_COOKIE}={role}:{token}; "
+        f"max-age={max_age}; path=/; SameSite=Lax';</script>",
+        height=0,
+    )
+
+
 def check_password() -> str | None:
     """認証済みなら 'admin' か 'user' を返す。未認証ならログイン画面を出して None。"""
 
@@ -67,14 +110,22 @@ def check_password() -> str | None:
     if role in ("admin", "user"):
         return role
 
+    # 接続が切れてもCookieがあれば自動で復元する
+    cookie_role = _login_from_cookie()
+    if cookie_role:
+        st.session_state["role"] = cookie_role
+        return cookie_role
+
     def password_entered():
         entered = st.session_state.get("password_input", "")
         admin_pw = st.secrets.get("ADMIN_PASSWORD", "")
         user_pw = st.secrets.get("APP_PASSWORD", "")
         if admin_pw and hmac.compare_digest(entered, admin_pw):
             st.session_state["role"] = "admin"
+            st.session_state["issue_cookie"] = True
         elif user_pw and hmac.compare_digest(entered, user_pw):
             st.session_state["role"] = "user"
+            st.session_state["issue_cookie"] = True
         else:
             st.session_state["auth_failed"] = True
         st.session_state["password_input"] = ""
@@ -236,13 +287,9 @@ def gh_dispatch_pipeline(inputs: dict) -> tuple[bool, str]:
     return False, f"HTTP {res.status_code}: {res.text[:300]}"
 
 
-GH_STATUS_JP = {
-    "queued": "待機中", "in_progress": "実行中", "completed": "完了",
-    "waiting": "待機中", "requested": "待機中", "pending": "待機中",
-}
-GH_CONCLUSION_JP = {
-    "success": "✅ 成功", "failure": "❌ 失敗", "cancelled": "中断",
-    "timed_out": "タイムアウト", "skipped": "スキップ",
+GH_CONCLUSION_ICON = {
+    "success": "✅ success", "failure": "❌ failure", "cancelled": "cancelled",
+    "timed_out": "timed_out", "skipped": "skipped",
 }
 
 
@@ -252,7 +299,7 @@ def _iso_to_jst(iso: str) -> datetime:
 
 
 def gh_recent_runs(limit: int = 5) -> list[dict]:
-    """パイプラインの直近の実行履歴を返す（時刻は日本時間）。"""
+    """パイプラインの直近の実行履歴を返す（時刻は日本時間・表記は英語）。"""
     token, repo = gh_config()
     url = (f"https://api.github.com/repos/{repo}/actions/workflows/"
            f"{GH_WORKFLOW_FILE}/runs")
@@ -268,12 +315,12 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
             elapsed = datetime.utcnow() + timedelta(hours=9) - started
         runs.append({
             "id": r["id"],
-            "status": r["status"],
-            "開始時刻(日本時間)": started.strftime("%m/%d %H:%M"),
-            "状態": GH_STATUS_JP.get(r["status"], r["status"]),
-            "結果": GH_CONCLUSION_JP.get(r["conclusion"], r["conclusion"] or "—"),
-            "所要時間": f"{int(elapsed.total_seconds() // 60)}分",
-            "URL": r["html_url"],
+            "_status": r["status"],
+            "Started (JST)": started.strftime("%m/%d %H:%M"),
+            "Status": r["status"],
+            "Result": GH_CONCLUSION_ICON.get(r["conclusion"], r["conclusion"] or "—"),
+            "Elapsed": f"{int(elapsed.total_seconds() // 60)}min",
+            "Log": r["html_url"],
         })
     return runs
 
@@ -478,11 +525,11 @@ def render_admin() -> None:
             runs = gh_recent_runs()
             if runs:
                 # 実行中のrunがあればステップ単位の進捗を表示
-                active = next((r for r in runs if r["status"] != "completed"), None)
+                active = next((r for r in runs if r["_status"] != "completed"), None)
                 if active:
                     st.markdown(
-                        f"**現在の進捗**（開始: {active['開始時刻(日本時間)']}、"
-                        f"経過: {active['所要時間']}）"
+                        f"**Progress** — started {active['Started (JST)']} (JST) / "
+                        f"elapsed {active['Elapsed']}"
                     )
                     try:
                         steps = gh_run_steps(active["id"])
@@ -494,10 +541,10 @@ def render_admin() -> None:
                         st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
                     st.caption("※ この画面は自動更新されません。「🔄 実行履歴・進捗を更新」で最新化してください。")
 
-                df_runs = pd.DataFrame(runs).drop(columns=["id", "status"])
+                df_runs = pd.DataFrame(runs).drop(columns=["id", "_status"])
                 st.dataframe(
                     df_runs, width="stretch", hide_index=True,
-                    column_config={"URL": st.column_config.LinkColumn("ログ")},
+                    column_config={"Log": st.column_config.LinkColumn("Log")},
                 )
             else:
                 st.caption("実行履歴はまだありません。")
@@ -559,6 +606,10 @@ if "APP_PASSWORD" not in st.secrets or not st.secrets["APP_PASSWORD"]:
 role = check_password()
 if role is None:
     st.stop()
+
+# ログイン直後の1回だけ、ブラウザへログイン維持Cookieを発行する
+if st.session_state.pop("issue_cookie", False):
+    issue_auth_cookie(role)
 
 sync_status = startup_cloud_sync()
 

@@ -39,24 +39,24 @@ jobs:
       HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
       PYTHONIOENCODING: utf-8
     steps:
-      - name: コード取得
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python環境準備
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
 
-      - name: ライブラリのインストール
+      - name: Install dependencies
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
           pip install --quiet -r requirements.txt
 
-      - name: クラウドからデータを取得
+      - name: Download data from cloud
         run: python sync_data.py download
 
-      - name: ① データ更新 (main.py)
+      - name: "Step 1: Data update (main.py)"
         if: ${{ inputs.run_update }}
         run: |
           ARGS=""
@@ -64,14 +64,14 @@ jobs:
           if [ -n "${{ inputs.to_date }}" ]; then ARGS="$ARGS --to-date ${{ inputs.to_date }}"; fi
           python main.py $ARGS
 
-      - name: ② モデル学習 (train_model.py)
+      - name: "Step 2: Train model (train_model.py)"
         if: ${{ inputs.run_train }}
         run: python train_model.py --trials "${{ inputs.trials }}"
 
-      - name: ③ シミュレーション (simulate.py)
+      - name: "Step 3: Simulate (simulate.py)"
         if: ${{ inputs.run_simulate }}
         run: python simulate.py
 
-      - name: クラウドへ結果を保存
+      - name: Upload results to cloud
         if: ${{ always() && !cancelled() }}
         run: python sync_data.py upload
