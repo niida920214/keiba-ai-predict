@@ -38,6 +38,9 @@ DATA_FILES = {
     "model/best_params.pickle": local_paths.MODEL_DIR / "best_params.pickle",
     "model/best_params_ranker.pickle": local_paths.MODEL_DIR / "best_params_ranker.pickle",
     "model/best_params_win.pickle": local_paths.MODEL_DIR / "best_params_win.pickle",
+    # Optunaのチューニング履歴。クラウドに保持することで、②モデル学習を
+    # 実行するたびに前回の探索の続きから再開できる（試行回数が積み上がる）。
+    "optuna_study.db": local_paths.BASE_DIR / "optuna_study.db",
 }
 
 # シミュレーション結果（管理者パネルでの表示用）

@@ -438,8 +438,8 @@ def recommend_next(log: list[dict]) -> tuple[str, dict | None]:
         return (
             f"{data_through} までのデータが揃っています。"
             "このデータに対して ② モデル学習 ＋ ③ シミュレーション の実行をおすすめします。"
-            "（Optuna試行回数200なら2〜5時間で6時間制限内に収まる見込み。"
-            "不安な場合は詳細オプションで150以下に）",
+            "（試行回数はデフォルトの100を推奨。200では6時間制限を超えた実績があります。"
+            "チューニング履歴は引き継がれるため、実行を重ねるごとに探索が積み上がります）",
             {"update": False, "train": True, "simulate": True,
              "from_date": "", "to_date": ""},
         )
@@ -642,11 +642,16 @@ def render_admin() -> None:
                                         placeholder="空欄=今月")
             with col3:
                 trials = st.number_input("Optuna試行回数", min_value=10,
-                                         max_value=500, value=200, step=10)
+                                         max_value=500, value=100, step=10)
+            st.caption(
+                "※ 取得期間は ① データ更新 のみに影響します。"
+                "②モデル学習・③シミュレーションは蓄積された全データを使うため、期間指定は無関係です。"
+            )
             if do_train:
                 st.caption(
-                    "⚠ 学習は試行回数200で数時間かかります。GitHub Actionsの上限"
-                    "（1ジョブ約6時間）を超えそうな場合は試行回数を減らしてください。"
+                    "⚠ 学習時間は試行回数にほぼ比例し、試行回数200では6時間制限を超えた実績があります。"
+                    "デフォルトの100を推奨。チューニング履歴はクラウドに引き継がれるため、"
+                    "実行を重ねるごとに探索が積み上がります。"
                 )
 
         operator = st.text_input(
@@ -654,8 +659,16 @@ def render_admin() -> None:
             placeholder="例: niida",
         )
 
+        # 起動できない場合は、その理由を必ず表示する
         if launch_blocked:
-            st.caption("⏳ パイプラインが実行中のため、完了するまで新しい起動はできません。")
+            st.caption(
+                "⏳ パイプラインが実行中（または順番待ち）のため、完了するまで新しい起動はできません。"
+                "GitHub側でキャンセルした場合は「🔄 実行履歴・進捗を更新」を押すと解除されます。"
+            )
+        elif not (do_update or do_train or do_simulate):
+            st.caption("☑ 実行する段階（①〜③）を1つ以上チェックすると起動できます。")
+        elif not operator.strip():
+            st.caption("✍ 実行者名を入力すると起動ボタンが有効になります。")
 
         if st.button("🚀 パイプラインを起動", type="primary",
                      disabled=launch_blocked or not operator.strip()
