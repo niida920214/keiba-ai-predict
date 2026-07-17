@@ -326,20 +326,6 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
 
 
 RUN_LOG_REMOTE = "logs/run_history.jsonl"
-STEP_ICON = {"success": "✅", "failure": "❌", "skipped": "—"}
-
-
-def fmt_step_cell(v) -> str:
-    """実行記録の段階セルを整形する（旧: 文字列 / 新: {outcome, min} 両対応）。"""
-    if isinstance(v, dict):
-        outcome = v.get("outcome", "skipped")
-        if outcome == "skipped":
-            return "—"
-        cell = f"{STEP_ICON.get(outcome, '')} {outcome}"
-        if "min" in v:
-            cell += f" ({v['min']}min)"
-        return cell
-    return STEP_ICON.get(v, "—")
 
 
 def load_run_log() -> list[dict]:
@@ -521,8 +507,37 @@ def gh_run_steps(run_id: int) -> list[dict]:
             elif mins >= 1:
                 dur = f" ({mins:.0f}min)"
         steps.append({"icon": icon, "name": s["name"], "status": s["status"],
-                      "dur": dur})
+                      "conclusion": s.get("conclusion"), "dur": dur})
     return steps
+
+
+SCRIPT_MARKERS = ["main.py", "train_model.py", "simulate.py"]
+
+
+def _script_from_step_name(name: str) -> str | None:
+    return next((m for m in SCRIPT_MARKERS if m in name), None)
+
+
+def get_active_script(run_id: int, is_running: bool) -> str:
+    """実行中/異常終了したrunで、①②③のうちどのスクリプトが該当するかを返す。"""
+    try:
+        steps = gh_run_steps(run_id)
+    except Exception:
+        return "-"
+    candidates = [s for s in steps if _script_from_step_name(s["name"])]
+    if not candidates:
+        return "-"
+    if is_running:
+        cur = next((s for s in candidates if s["status"] == "in_progress"), None)
+        return _script_from_step_name(cur["name"]) if cur else "-"
+    failed = next((s for s in candidates if s["conclusion"] == "failure"), None)
+    if failed:
+        return _script_from_step_name(failed["name"])
+    cancelled = next((s for s in candidates if s["conclusion"] == "cancelled"), None)
+    if cancelled:
+        return _script_from_step_name(cancelled["name"])
+    non_skipped = [s for s in candidates if s["conclusion"] != "skipped"]
+    return _script_from_step_name(non_skipped[-1]["name"]) if non_skipped else "-"
 
 
 # ---------------------------------------------------------------------------
@@ -777,45 +792,51 @@ def render_admin() -> None:
         if runs_error:
             st.error(f"実行履歴の取得に失敗しました: {runs_error}")
         elif runs:
-            # 最新の実行（1ループ分）のステップ進捗を常時表示する。
-            # 実行中はライブ進捗、完了後も次の実行が始まるまで結果を表示し続ける。
             latest = runs[0]
             is_running = latest["_status"] != "completed"
-            if is_running:
-                st.markdown(
-                    f"**Progress** — started {latest['Started (JST)']} (JST) / "
-                    f"elapsed {latest['Elapsed']}"
-                )
-            else:
-                st.markdown(
-                    f"**Progress (last run)** — started {latest['Started (JST)']} (JST) / "
-                    f"elapsed {latest['Elapsed']} / {latest['Result']}"
-                )
-            try:
-                steps = gh_run_steps(latest["id"])
-                for s in steps:
-                    st.markdown(f"{s['icon']} {s['name']}{s['dur']}")
-                if not steps:
-                    st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
-            except Exception:
-                st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
-            if is_running:
-                st.caption(
-                    "※ ⏳は「まだ到達していない」の意味で、実行予定とは限りません。"
-                    "チェックを入れなかった段階は到達時に ⏭️（skipped）として飛ばされます。"
-                    "この画面は自動更新されないので「🔄 実行履歴・進捗を更新」で最新化してください。"
-                )
+            is_success = "success" in str(latest["Result"])
 
-            df_runs = pd.DataFrame(runs).drop(columns=["id", "_status"])
-            st.dataframe(
-                df_runs, width="stretch", hide_index=True,
-                column_config={"Log": st.column_config.LinkColumn("Log")},
-            )
+            # --- Live / Attention: 実行中、または異常終了が次回実行まで残る1行表示 ---
+            # 正常完了時はここには何も出さない（詳細は下の永続記録に残るため）。
+            if is_running or not is_success:
+                script = get_active_script(latest["id"], is_running)
+                status_label = ("in progress" if is_running
+                                else "cancelled" if "cancel" in str(latest["Result"]).lower()
+                                else "failed")
+                icon = "🔄" if is_running else ("🟡" if status_label == "cancelled" else "🔴")
+                st.markdown(f"**{icon} {'Live' if is_running else 'Attention'}**")
+                st.dataframe(
+                    pd.DataFrame([{
+                        "Started (JST)": latest["Started (JST)"],
+                        "Operator": operator or "-",
+                        "Script": script,
+                        "Status": status_label,
+                        "Elapsed": latest["Elapsed"],
+                        "Log": latest["Log"],
+                    }]),
+                    width="stretch", hide_index=True,
+                    column_config={"Log": st.column_config.LinkColumn("Log")},
+                )
+                if is_running:
+                    try:
+                        steps = gh_run_steps(latest["id"])
+                        for s in steps:
+                            st.markdown(f"{s['icon']} {s['name']}{s['dur']}")
+                    except Exception:
+                        st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
+                    st.caption(
+                        "※ ⏳は「まだ到達していない」の意味で、実行予定とは限りません。"
+                        "チェックを入れなかった段階は到達時に ⏭️（skipped）として飛ばされます。"
+                        "この画面は自動更新されないので「🔄 実行履歴・進捗を更新」で最新化してください。"
+                    )
+                else:
+                    st.caption(
+                        "この実行は正常に完了しませんでした。詳細は Log を確認してください。"
+                        "次の実行を起動するとこの表示は消えます。"
+                    )
 
             # --- 次のステップ: 完了した成果の取り込み ---
-            latest = runs[0]
-            if (active is None
-                    and "success" in str(latest["Result"])
+            if (not is_running and is_success
                     and st.session_state.get("imported_for_run") != latest["id"]
                     and cloud_storage.is_configured()):
                 st.success(
@@ -844,24 +865,54 @@ def render_admin() -> None:
         "パイプラインの実行ごとに1行ずつクラウドへ記録され、消えません。"
         "「いつ・誰が・①〜③のどれを・何分で・データはいつまでの分か」が残ります。"
     )
+    RESULT_LABEL = {"success": "completed", "failure": "failed", "cancelled": "cancelled"}
+
+    def _script_row(record: dict, step_key: str, script_name: str) -> dict | None:
+        """実行された段階1つ分を1行に整形する。スキップされた段階は None。"""
+        step_val = record.get("steps", {}).get(step_key)
+        outcome = _step_outcome(step_val)
+        if outcome == "skipped":
+            return None
+        detail = None
+        if isinstance(step_val, dict):
+            if step_key == "update" and step_val.get("period"):
+                detail = step_val["period"]
+            elif step_key == "train" and step_val.get("trials"):
+                detail = f"{step_val['trials']} trials"
+        label = f"{script_name} ({detail})" if detail else script_name
+
+        if isinstance(step_val, dict) and "min" in step_val:
+            elapsed = f"{step_val['min']}min"
+        else:
+            elapsed = f"{record.get('elapsed_min', '-')}min"
+
+        return {
+            "Started (JST)": record.get("started_jst", "-"),
+            "Operator": record.get("operator", "-"),
+            "Script": label,
+            "Result": RESULT_LABEL.get(outcome, outcome),
+            "Elapsed": elapsed,
+            "Log": record.get("run_url") or None,
+        }
+
     if cloud_storage.is_configured():
         try:
             log = load_run_log()
-            if log:
-                rows = []
-                for r in log:
-                    steps = r.get("steps", {})
-                    rows.append({
-                        "Started (JST)": r.get("started_jst", "-"),
-                        "Operator": r.get("operator", "-"),
-                        "① Update": fmt_step_cell(steps.get("update")),
-                        "② Train": fmt_step_cell(steps.get("train")),
-                        "③ Simulate": fmt_step_cell(steps.get("simulate")),
-                        "Result": r.get("result", "-"),
-                        "Elapsed": f"{r.get('elapsed_min', '-')}min",
-                        "Data through": r.get("data_through", "-"),
-                    })
-                st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            rows = []
+            for r in log:
+                for step_key, script_name in (
+                    ("update", "main.py"),
+                    ("train", "train_model.py"),
+                    ("simulate", "simulate.py"),
+                ):
+                    row = _script_row(r, step_key, script_name)
+                    if row:
+                        rows.append(row)
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows), width="stretch", hide_index=True,
+                    column_config={"Log": st.column_config.LinkColumn("Log")},
+                )
             else:
                 st.caption("記録はまだありません（次回のパイプライン実行から記録されます）。")
         except Exception as e:

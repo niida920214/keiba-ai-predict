@@ -100,10 +100,15 @@ jobs:
         run: python sync_data.py upload
 
       - name: Record run history
-        if: ${{ always() && !cancelled() }}
+        # 途中でキャンセル/タイムアウトされた場合も記録に残す（!cancelled() を付けない）
+        if: ${{ always() }}
         env:
           OPERATOR: ${{ inputs.operator }}
           OUTCOME_UPDATE: ${{ steps.update.outcome }}
           OUTCOME_TRAIN: ${{ steps.train.outcome }}
           OUTCOME_SIM: ${{ steps.simulate.outcome }}
+          FROM_DATE_INPUT: ${{ inputs.from_date }}
+          TO_DATE_INPUT: ${{ inputs.to_date }}
+          TRIALS_INPUT: ${{ inputs.trials }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python record_run.py
