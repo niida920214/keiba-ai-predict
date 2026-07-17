@@ -12,7 +12,7 @@ streamlit_app.py -- 競馬AI レース予測（公開版）
 
 import hmac
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -236,8 +236,23 @@ def gh_dispatch_pipeline(inputs: dict) -> tuple[bool, str]:
     return False, f"HTTP {res.status_code}: {res.text[:300]}"
 
 
+GH_STATUS_JP = {
+    "queued": "待機中", "in_progress": "実行中", "completed": "完了",
+    "waiting": "待機中", "requested": "待機中", "pending": "待機中",
+}
+GH_CONCLUSION_JP = {
+    "success": "✅ 成功", "failure": "❌ 失敗", "cancelled": "中断",
+    "timed_out": "タイムアウト", "skipped": "スキップ",
+}
+
+
+def _iso_to_jst(iso: str) -> datetime:
+    """GitHub APIのUTC時刻文字列を日本時間のdatetimeに変換する。"""
+    return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+
+
 def gh_recent_runs(limit: int = 5) -> list[dict]:
-    """パイプラインの直近の実行履歴を返す。"""
+    """パイプラインの直近の実行履歴を返す（時刻は日本時間）。"""
     token, repo = gh_config()
     url = (f"https://api.github.com/repos/{repo}/actions/workflows/"
            f"{GH_WORKFLOW_FILE}/runs")
@@ -246,13 +261,43 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
     res.raise_for_status()
     runs = []
     for r in res.json().get("workflow_runs", []):
+        started = _iso_to_jst(r["created_at"])
+        if r["status"] == "completed":
+            elapsed = _iso_to_jst(r["updated_at"]) - started
+        else:
+            elapsed = datetime.utcnow() + timedelta(hours=9) - started
         runs.append({
-            "開始時刻(UTC)": r["created_at"].replace("T", " ").replace("Z", ""),
-            "状態": r["status"],
-            "結果": r["conclusion"] or "-",
+            "id": r["id"],
+            "status": r["status"],
+            "開始時刻(日本時間)": started.strftime("%m/%d %H:%M"),
+            "状態": GH_STATUS_JP.get(r["status"], r["status"]),
+            "結果": GH_CONCLUSION_JP.get(r["conclusion"], r["conclusion"] or "—"),
+            "所要時間": f"{int(elapsed.total_seconds() // 60)}分",
             "URL": r["html_url"],
         })
     return runs
+
+
+def gh_run_steps(run_id: int) -> list[dict]:
+    """実行中ジョブのステップごとの進捗を返す。"""
+    token, repo = gh_config()
+    url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/jobs"
+    res = requests.get(url, headers=gh_headers(token), timeout=30)
+    res.raise_for_status()
+    jobs = res.json().get("jobs", [])
+    if not jobs:
+        return []
+    steps = []
+    for s in jobs[0].get("steps", []):
+        if s["status"] == "completed":
+            icon = {"success": "✅", "failure": "❌", "skipped": "⏭️"}.get(
+                s["conclusion"], "✅")
+        elif s["status"] == "in_progress":
+            icon = "🔄"
+        else:
+            icon = "⏳"
+        steps.append({"icon": icon, "name": s["name"], "status": s["status"]})
+    return steps
 
 
 # ---------------------------------------------------------------------------
@@ -426,14 +471,32 @@ def render_admin() -> None:
             else:
                 st.error(f"起動に失敗しました: {msg}")
 
-        if st.button("🔄 実行履歴を更新"):
+        if st.button("🔄 実行履歴・進捗を更新"):
             pass  # ボタン押下でrerunされ、下の履歴が再取得される
 
         try:
             runs = gh_recent_runs()
             if runs:
+                # 実行中のrunがあればステップ単位の進捗を表示
+                active = next((r for r in runs if r["status"] != "completed"), None)
+                if active:
+                    st.markdown(
+                        f"**現在の進捗**（開始: {active['開始時刻(日本時間)']}、"
+                        f"経過: {active['所要時間']}）"
+                    )
+                    try:
+                        steps = gh_run_steps(active["id"])
+                        for s in steps:
+                            st.markdown(f"{s['icon']} {s['name']}")
+                        if not steps:
+                            st.caption("ジョブ起動待ちです（数十秒後に更新してください）。")
+                    except Exception:
+                        st.caption("進捗の取得に失敗しました（更新で再試行できます）。")
+                    st.caption("※ この画面は自動更新されません。「🔄 実行履歴・進捗を更新」で最新化してください。")
+
+                df_runs = pd.DataFrame(runs).drop(columns=["id", "status"])
                 st.dataframe(
-                    pd.DataFrame(runs), width="stretch", hide_index=True,
+                    df_runs, width="stretch", hide_index=True,
                     column_config={"URL": st.column_config.LinkColumn("ログ")},
                 )
             else:

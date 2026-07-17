@@ -39,24 +39,24 @@ jobs:
       HF_REPO_ID: ${{ secrets.HF_REPO_ID }}
       PYTHONIOENCODING: utf-8
     steps:
-      - name: Checkout
+      - name: コード取得
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Python環境準備
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
           cache: pip
 
-      - name: Install dependencies
+      - name: ライブラリのインストール
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
           pip install --quiet -r requirements.txt
 
-      - name: Download data from Hugging Face
+      - name: クラウドからデータを取得
         run: python sync_data.py download
 
-      - name: Run data update (main.py)
+      - name: ① データ更新 (main.py)
         if: ${{ inputs.run_update }}
         run: |
           ARGS=""
@@ -64,14 +64,14 @@ jobs:
           if [ -n "${{ inputs.to_date }}" ]; then ARGS="$ARGS --to-date ${{ inputs.to_date }}"; fi
           python main.py $ARGS
 
-      - name: Run training (train_model.py)
+      - name: ② モデル学習 (train_model.py)
         if: ${{ inputs.run_train }}
         run: python train_model.py --trials "${{ inputs.trials }}"
 
-      - name: Run simulation (simulate.py)
+      - name: ③ シミュレーション (simulate.py)
         if: ${{ inputs.run_simulate }}
         run: python simulate.py
 
-      - name: Upload results to Hugging Face
+      - name: クラウドへ結果を保存
         if: ${{ always() && !cancelled() }}
         run: python sync_data.py upload
