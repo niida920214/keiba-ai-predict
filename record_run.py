@@ -79,6 +79,12 @@ def build_record() -> dict:
         if trials.isdigit():
             train["trials"] = int(trials)
 
+    # ③: 指定された閾値スキャン段階数
+    if simulate["outcome"] != "skipped":
+        ns = os.environ.get("N_SAMPLES_INPUT", "").strip()
+        if ns.isdigit():
+            simulate["n_samples"] = int(ns)
+
     steps = {"update": update, "train": train, "simulate": simulate}
 
     executed = [s["outcome"] for s in steps.values() if s["outcome"] != "skipped"]

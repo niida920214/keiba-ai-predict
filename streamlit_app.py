@@ -12,7 +12,7 @@ streamlit_app.py -- 競馬AI レース予測（公開版）
 
 import hmac
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -313,9 +313,12 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
             elapsed = _iso_to_jst(r["updated_at"]) - started
         else:
             elapsed = datetime.utcnow() + timedelta(hours=9) - started
+        created_utc = datetime.strptime(
+            r["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         runs.append({
             "id": r["id"],
             "_status": r["status"],
+            "_created_ts": created_utc.timestamp(),
             "Started (JST)": started.strftime("%m/%d %H:%M"),
             "Status": r["status"],
             "Result": GH_CONCLUSION_ICON.get(r["conclusion"], r["conclusion"] or "—"),
@@ -326,6 +329,58 @@ def gh_recent_runs(limit: int = 5) -> list[dict]:
 
 
 RUN_LOG_REMOTE = "logs/run_history.jsonl"
+LAST_LAUNCH_REMOTE = "logs/last_launch.json"
+
+
+def save_last_launch(info: dict) -> None:
+    """起動時の実行プラン（選択scriptと詳細オプション）をクラウドへ保存する。
+
+    GitHubのAPIは起動入力を返さないため、Live表示はこれを参照する。
+    保存に失敗しても起動自体には影響させない。
+    """
+    import json as _json
+    import tempfile
+    try:
+        token, repo_id = cloud_storage.get_config()
+        tmp = Path(tempfile.gettempdir()) / "last_launch.json"
+        tmp.write_text(_json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        cloud_storage._api().upload_file(
+            path_or_fileobj=str(tmp), path_in_repo=LAST_LAUNCH_REMOTE,
+            repo_id=repo_id, repo_type="dataset",
+        )
+    except Exception:
+        pass
+
+
+def load_last_launch() -> dict | None:
+    """クラウド上の直近の実行プランを返す（無ければ None）。"""
+    import json as _json
+    try:
+        from huggingface_hub import hf_hub_download
+        token, repo_id = cloud_storage.get_config()
+        cached = hf_hub_download(
+            repo_id=repo_id, filename=LAST_LAUNCH_REMOTE,
+            repo_type="dataset", token=token,
+        )
+        with open(cached, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def plan_for_run(run: dict) -> dict | None:
+    """実行プランがこのrunのものなら返す（起動〜run作成の時間近接で照合）。"""
+    info = load_last_launch()
+    if not info or "ts" not in info:
+        return None
+    created_ts = run.get("_created_ts")
+    if created_ts is None:
+        return None
+    delta = created_ts - info["ts"]
+    # dispatch の数秒〜数十秒後に run が作られる。大きくずれていたら別起動とみなす
+    if -120 < delta < 1800:
+        return info
+    return None
 
 
 def load_run_log() -> list[dict]:
@@ -752,6 +807,25 @@ def render_admin() -> None:
             })
             if ok:
                 st.session_state["pipeline_launched_at"] = time.time()
+                # Live表示用に実行プラン（選択scriptと詳細オプション）をクラウドへ保存
+                today_ym = (datetime.now(timezone.utc)
+                            + timedelta(hours=9)).strftime("%Y-%m")
+                plan = []
+                if do_update:
+                    period = (f"{from_date.strip() or '2016-01'} 〜 "
+                              f"{to_date.strip() or today_ym}")
+                    plan.append({"script": "main.py", "detail": period})
+                if do_train:
+                    plan.append({"script": "train_model.py",
+                                 "detail": f"{int(trials)} trials"})
+                if do_simulate:
+                    plan.append({"script": "simulate.py",
+                                 "detail": f"{int(n_samples)} samples"})
+                save_last_launch({
+                    "ts": time.time(),
+                    "operator": operator.strip(),
+                    "plan": plan,
+                })
                 st.session_state["flash_pipeline"] = (
                     "🚀 パイプラインを起動しました。進行状況は下の実行履歴で確認できます"
                     "（GitHubへの反映まで数十秒かかることがあります）。"
@@ -779,12 +853,20 @@ def render_admin() -> None:
                                 else "cancelled" if "cancel" in str(latest["Result"]).lower()
                                 else "failed")
                 icon = "🔄" if is_running else ("🟡" if status_label == "cancelled" else "🔴")
+
+                # 起動時に保存した実行プランから、実行者と各scriptの詳細オプションを引く
+                launch = plan_for_run(latest) if cloud_storage.is_configured() else None
+                plan = (launch or {}).get("plan", [])
+                detail = next((p.get("detail") for p in plan
+                               if p.get("script") == script), None)
+                script_cell = f"{script} ({detail})" if detail else script
+
                 st.markdown(f"**{icon} {'Live' if is_running else 'Attention'}**")
                 st.dataframe(
                     pd.DataFrame([{
                         "Started (JST)": latest["Started (JST)"],
-                        "Operator": operator or "-",
-                        "Script": script,
+                        "Operator": (launch or {}).get("operator") or "-",
+                        "Script": script_cell,
                         "Status": status_label,
                         "Elapsed": latest["Elapsed"],
                         "Log": latest["Log"],
@@ -792,6 +874,12 @@ def render_admin() -> None:
                     width="stretch", hide_index=True,
                     column_config={"Log": st.column_config.LinkColumn("Log")},
                 )
+                if len(plan) > 1:
+                    plan_str = " → ".join(
+                        f"{p['script']} ({p['detail']})" if p.get("detail")
+                        else p["script"] for p in plan
+                    )
+                    st.caption(f"実行内容（{len(plan)}本）: {plan_str}")
                 if is_running:
                     try:
                         steps = gh_run_steps(latest["id"])
@@ -854,6 +942,8 @@ def render_admin() -> None:
                 detail = step_val["period"]
             elif step_key == "train" and step_val.get("trials"):
                 detail = f"{step_val['trials']} trials"
+            elif step_key == "simulate" and step_val.get("n_samples"):
+                detail = f"{step_val['n_samples']} samples"
         label = f"{script_name} ({detail})" if detail else script_name
 
         if isinstance(step_val, dict) and "min" in step_val:

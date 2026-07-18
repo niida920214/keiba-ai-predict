@@ -119,5 +119,6 @@ jobs:
           FROM_DATE_INPUT: ${{ inputs.from_date }}
           TO_DATE_INPUT: ${{ inputs.to_date }}
           TRIALS_INPUT: ${{ inputs.trials }}
+          N_SAMPLES_INPUT: ${{ inputs.n_samples }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: python record_run.py
