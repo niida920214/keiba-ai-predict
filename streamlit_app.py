@@ -566,56 +566,7 @@ def render_admin() -> None:
     st.subheader("🛠 管理者パネル")
 
     # ================================================================
-    # 1. クラウドストレージ（Hugging Face Hub）
-    # ================================================================
-    st.markdown("**☁️ クラウドストレージ（Hugging Face Hub）**")
-    if cloud_storage.is_configured():
-        _, repo_id = cloud_storage.get_config()
-        st.success(f"接続設定済み: `{repo_id}`（非公開）")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("⬇ クラウドの最新モデルを取り込む"):
-                try:
-                    with st.spinner("ダウンロード中..."):
-                        msg = _import_latest_from_cloud()
-                    st.success(msg)
-                except Exception as e:
-                    st.error(f"取り込みに失敗しました: {e}")
-        with col2:
-            if st.button("📄 クラウド上のファイル一覧を表示"):
-                try:
-                    st.dataframe(pd.DataFrame(cloud_storage.list_remote_files()),
-                                 width="stretch", hide_index=True)
-                except Exception as e:
-                    st.error(f"一覧の取得に失敗しました: {e}")
-    else:
-        st.warning(
-            "クラウドストレージが未設定です。Streamlit Cloud の Settings → Secrets に "
-            "`HF_TOKEN`（Hugging FaceのWriteトークン）と `HF_REPO_ID` を追加すると、"
-            "モデルのクラウド保存・自動配信が有効になります。"
-        )
-
-    st.markdown("---")
-
-    # ================================================================
-    # 2. 現在有効なモデル・データ
-    # ================================================================
-    st.markdown("**現在有効なモデル・データ**")
-    rows = []
-    for name, path in UPLOADABLE_FILES.items():
-        if path.exists():
-            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            rows.append({"ファイル": name, "更新日時": mtime,
-                         "サイズ(MB)": round(path.stat().st_size / 1024 / 1024, 2)})
-        else:
-            rows.append({"ファイル": name, "更新日時": "（なし）", "サイズ(MB)": None})
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-
-    st.markdown("---")
-
-    # ================================================================
-    # 3. パイプライン実行 (GitHub Actions)
+    # 1. パイプライン実行 (GitHub Actions)
     # ================================================================
     st.markdown("**🔁 パイプライン実行（GitHub Actions）**")
     gh_token, gh_repo = gh_config()
@@ -683,45 +634,44 @@ def render_admin() -> None:
              if _step_outcome(r.get("steps", {}).get("simulate")) == "success"), None)
         data_thr = last_upd.get("data_through", "-") if last_upd else None
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            do_update = st.checkbox("① データ更新 (main.py)", key="cb_update")
-            if data_thr and data_thr != "-":
-                try:
-                    days_old = (datetime.utcnow() + timedelta(hours=9)
-                                - datetime.strptime(data_thr, "%Y-%m-%d")).days
-                except ValueError:
-                    days_old = None
-                note = f"📦 保有データ: 2016-01 〜 {data_thr}"
-                if days_old is not None:
-                    note += ("（最新です。次の開催週末後に実行してください）"
-                             if days_old < 7 else f"（{days_old}日前・要更新）")
-                st.caption(note)
-            else:
-                st.caption("📦 保有データ: 実行記録なし")
-        with col2:
-            do_train = st.checkbox("② モデル学習 (train_model.py)", key="cb_train")
-            counts = get_tuning_counts()
-            n_top3 = counts.get("top3_study", 0)
-            n_win = counts.get("win_study", 0)
-            n_rank = counts.get("ranker_study", 0)
-            if n_top3 + n_win + n_rank > 0:
-                st.caption(
-                    f"🔁 累積チューニング: 計{n_top3 + n_win + n_rank}回"
-                    f"（Top3 {n_top3} / Win {n_win} / Ranker {n_rank}）。"
-                    "実行のたびに続きから積み上がります"
-                )
-            else:
-                st.caption("🔁 累積チューニング: 履歴なし")
-        with col3:
-            do_simulate = st.checkbox("③ シミュレーション (simulate.py)", key="cb_sim")
-            if last_sim:
-                st.caption(
-                    f"📈 最終検証: {last_sim.get('started_jst', '-')[:10]}。"
-                    "現行モデルの回収率をテスト期間で検証します（②とセット推奨）"
-                )
-            else:
-                st.caption("📈 まだ未検証。②の後に実行すると新モデルの回収率を確認できます")
+        # --- ①〜③の選択（縦並び・大きめのトグル＋一行説明） ---
+        if data_thr and data_thr != "-":
+            try:
+                days_old = (datetime.utcnow() + timedelta(hours=9)
+                            - datetime.strptime(data_thr, "%Y-%m-%d")).days
+            except ValueError:
+                days_old = None
+            note_update = f"📦 保有データ: 2016-01 〜 {data_thr}"
+            if days_old is not None:
+                note_update += ("（最新です。次の開催週末後に実行してください）"
+                                if days_old < 7 else f"（{days_old}日前・要更新）")
+        else:
+            note_update = "📦 保有データ: 実行記録なし"
+
+        counts = get_tuning_counts()
+        n_top3 = counts.get("top3_study", 0)
+        n_win = counts.get("win_study", 0)
+        n_rank = counts.get("ranker_study", 0)
+        if n_top3 + n_win + n_rank > 0:
+            note_train = (f"🔁 累積チューニング: 計{n_top3 + n_win + n_rank}回"
+                          f"（Top3 {n_top3} / Win {n_win} / Ranker {n_rank}）。"
+                          "実行のたびに続きから積み上がります")
+        else:
+            note_train = "🔁 累積チューニング: 履歴なし"
+
+        if last_sim:
+            note_sim = (f"📈 最終検証: {last_sim.get('started_jst', '-')[:10]}。"
+                        "現行モデルの回収率をテスト期間で検証します（②とセット推奨）")
+        else:
+            note_sim = "📈 まだ未検証。②の後に実行すると新モデルの回収率を確認できます"
+
+        with st.container(border=True):
+            do_update = st.toggle("**① データ更新 (main.py)**", key="cb_update")
+            st.caption(note_update)
+            do_train = st.toggle("**② モデル学習 (train_model.py)**", key="cb_train")
+            st.caption(note_train)
+            do_simulate = st.toggle("**③ シミュレーション (simulate.py)**", key="cb_sim")
+            st.caption(note_sim)
 
         with st.expander("詳細オプション"):
             if do_update:
@@ -740,12 +690,21 @@ def render_admin() -> None:
                     "⚠ 学習時間は試行回数にほぼ比例し、200では6時間制限を超えた実績があります。"
                     "デフォルトの100を推奨（履歴が引き継がれるため、実行を重ねれば探索は積み上がります）。"
                 )
-            if not (do_update or do_train):
-                st.caption("チェックした段階に応じたオプションがここに表示されます。")
+            if do_simulate:
+                st.number_input("シミュレーションの細かさ (n_samples)", min_value=10,
+                                max_value=100, value=25, step=5, key="opt_nsamples")
+                st.caption(
+                    "⚠ 各戦略の閾値スキャン段階数。時間はほぼ比例し、50では6時間制限を"
+                    "超えた実績があります。デフォルトの25を推奨。"
+                    "150分のステップ制限つきで、成果は完成した分から順次クラウドへ保存されます。"
+                )
+            if not (do_update or do_train or do_simulate):
+                st.caption("オンにした段階に応じたオプションがここに表示されます。")
 
         from_date = st.session_state.get("opt_from", "") if do_update else ""
         to_date = st.session_state.get("opt_to", "") if do_update else ""
         trials = int(st.session_state.get("opt_trials", 100))
+        n_samples = int(st.session_state.get("opt_nsamples", 25))
 
         operator = st.text_input(
             "実行者名（実行記録に残ります・必須）", max_chars=20,
@@ -763,7 +722,22 @@ def render_admin() -> None:
         elif not operator.strip():
             st.caption("✍ 実行者名を入力すると起動ボタンが有効になります。")
 
-        if st.button("🚀 パイプラインを起動", type="primary",
+        # 実行中は薄い赤のまま「実行中」表示に切り替える（下のCSSとセット）
+        launch_label = ("⏳ 実行中…（完了までロック）" if launch_blocked
+                        else "🚀 パイプラインを起動")
+        st.markdown(
+            """<style>
+            button[data-testid="stBaseButton-primary"]:disabled,
+            button[kind="primary"]:disabled {
+                background-color: rgba(255, 75, 75, 0.35) !important;
+                border-color: transparent !important;
+                color: rgba(255, 255, 255, 0.9) !important;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
+
+        if st.button(launch_label, type="primary",
                      disabled=launch_blocked or not operator.strip()
                      or not (do_update or do_train or do_simulate)):
             ok, msg = gh_dispatch_pipeline({
@@ -773,6 +747,7 @@ def render_admin() -> None:
                 "from_date": from_date.strip(),
                 "to_date": to_date.strip(),
                 "trials": str(int(trials)),
+                "n_samples": str(int(n_samples)),
                 "operator": operator.strip(),
             })
             if ok:
@@ -952,6 +927,55 @@ def render_admin() -> None:
                 st.caption("表示できる結果画像がまだありません（シミュレーション未実行）。")
     else:
         st.caption("クラウドストレージ設定後に利用できます。")
+
+    st.markdown("---")
+
+    # ================================================================
+    # 4. クラウドストレージ（Hugging Face Hub）
+    # ================================================================
+    st.markdown("**☁️ クラウドストレージ（Hugging Face Hub）**")
+    if cloud_storage.is_configured():
+        _, repo_id = cloud_storage.get_config()
+        st.success(f"接続設定済み: `{repo_id}`（非公開）")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("⬇ クラウドの最新モデルを取り込む"):
+                try:
+                    with st.spinner("ダウンロード中..."):
+                        msg = _import_latest_from_cloud()
+                    st.success(msg)
+                except Exception as e:
+                    st.error(f"取り込みに失敗しました: {e}")
+        with col2:
+            if st.button("📄 クラウド上のファイル一覧を表示"):
+                try:
+                    st.dataframe(pd.DataFrame(cloud_storage.list_remote_files()),
+                                 width="stretch", hide_index=True)
+                except Exception as e:
+                    st.error(f"一覧の取得に失敗しました: {e}")
+    else:
+        st.warning(
+            "クラウドストレージが未設定です。Streamlit Cloud の Settings → Secrets に "
+            "`HF_TOKEN`（Hugging FaceのWriteトークン）と `HF_REPO_ID` を追加すると、"
+            "モデルのクラウド保存・自動配信が有効になります。"
+        )
+
+    st.markdown("---")
+
+    # ================================================================
+    # 5. 現在有効なモデル・データ
+    # ================================================================
+    st.markdown("**現在有効なモデル・データ**")
+    rows = []
+    for name, path in UPLOADABLE_FILES.items():
+        if path.exists():
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            rows.append({"ファイル": name, "更新日時": mtime,
+                         "サイズ(MB)": round(path.stat().st_size / 1024 / 1024, 2)})
+        else:
+            rows.append({"ファイル": name, "更新日時": "（なし）", "サイズ(MB)": None})
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     st.markdown("---")
 

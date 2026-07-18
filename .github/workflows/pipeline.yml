@@ -29,6 +29,10 @@ on:
         description: "Optuna試行回数の基準値（学習時のみ使用）"
         type: string
         default: "200"
+      n_samples:
+        description: "シミュレーションの閾値スキャン段階数（③のみ使用。時間はほぼ比例）"
+        type: string
+        default: "25"
       operator:
         description: "実行者名（実行記録に残ります）"
         type: string
@@ -90,9 +94,14 @@ jobs:
       - name: "Step 3: Simulate (simulate.py)"
         id: simulate
         if: ${{ inputs.run_simulate }}
+        # ステップ単体の制限時間: 超過してもジョブは続行し、①②の成果・実行記録は保存される。
+        # 成果物は保存された瞬間にクラウドへ逐次アップロード（CHECKPOINT_UPLOAD）。
+        timeout-minutes: 150
+        env:
+          CHECKPOINT_UPLOAD: "1"
         run: |
           STEP_START=$(date -u +%s)
-          python simulate.py
+          python simulate.py --n-samples "${{ inputs.n_samples }}"
           echo "DUR_SIM=$(( ( $(date -u +%s) - STEP_START ) / 60 ))" >> "$GITHUB_ENV"
 
       - name: Upload results to cloud

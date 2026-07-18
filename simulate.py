@@ -51,7 +51,34 @@ def gain_ev(return_func, X, n_samples=50, ev_range=None):
     return pd.DataFrame(gain_dict).T
 
 
+def checkpoint_upload(*paths) -> None:
+    """成果物を保存した直後にクラウドへ逐次アップロードする。
+
+    環境変数 CHECKPOINT_UPLOAD=1 のとき有効（GitHub Actions用）。
+    タイムアウトで打ち切られても、完成済みの成果物は失われない。
+    """
+    import os
+    if os.environ.get("CHECKPOINT_UPLOAD") != "1":
+        return
+    try:
+        import cloud_storage
+        files = {f"results/{Path(p).name}": Path(p) for p in paths if Path(p).exists()}
+        if files:
+            cloud_storage.upload_files(files, log=lambda _: None)
+            print(f"  [CKPT] {', '.join(Path(p).name for p in paths)} をクラウドへ保存")
+    except Exception as e:
+        print(f"  [CKPT] アップロード失敗（処理は継続）: {e}")
+
+
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="回収率シミュレーション")
+    parser.add_argument(
+        "--n-samples", type=int, default=50,
+        help="各戦略の閾値スキャンの段階数（デフォルト50。実行時間はほぼ比例）",
+    )
+    args = parser.parse_args()
+
     local_paths.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # ==================================================================
@@ -131,7 +158,7 @@ def main() -> None:
 
     # ==================================================================
     # 4. シミュレーション実行
-    N_SAMPLES = 50
+    N_SAMPLES = args.n_samples
     EV_RANGE = [0.8, 2.0]
     T_RANGE = [0.5, 3.5]
     MAX_ODDS_LIST = [10, 20, 30, 50]
@@ -410,6 +437,7 @@ def main() -> None:
     path1 = local_paths.RESULTS_DIR / "all_strategies_return_rate.png"
     fig.savefig(path1, dpi=150)
     plt.close(fig)
+    checkpoint_upload(path1)
     print(f"  -> {path1}")
 
     # --- 5-2. Return Rate vs n_bets ---
@@ -453,6 +481,7 @@ def main() -> None:
     path2 = local_paths.RESULTS_DIR / "all_strategies_vs_nbets.png"
     fig.savefig(path2, dpi=150)
     plt.close(fig)
+    checkpoint_upload(path2)
     print(f"  -> {path2}")
 
     # --- 5-3. WinModel vs Harville 直接比較 (odds<=20) ---
@@ -479,6 +508,7 @@ def main() -> None:
     path3 = local_paths.RESULTS_DIR / "harville_vs_winmodel.png"
     fig.savefig(path3, dpi=150)
     plt.close(fig)
+    checkpoint_upload(path3)
     print(f"  -> {path3}")
 
     # --- 5-4. 三連系券種比較 ---
@@ -509,6 +539,7 @@ def main() -> None:
     path4 = local_paths.RESULTS_DIR / "exotic_strategies_return_rate.png"
     fig.savefig(path4, dpi=150)
     plt.close(fig)
+    checkpoint_upload(path4)
     print(f"  -> {path4}")
 
     # ==================================================================
@@ -567,6 +598,7 @@ def main() -> None:
     summary_df = pd.DataFrame(summary).T
     summary_path = local_paths.RESULTS_DIR / "simulation_summary.csv"
     summary_df.to_csv(summary_path, encoding="utf-8-sig")
+    checkpoint_upload(summary_path)
     print(f"\n  Summary saved: {summary_path}")
     print(summary_df.to_string())
 
