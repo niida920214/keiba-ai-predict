@@ -325,65 +325,49 @@ def main() -> None:
             if not g.empty:
                 print(f"  Max: {g['return_rate'].max():.4f} @ {g['return_rate'].idxmax():.3f}")
 
-    # --- 4-6. 三連複 EVベース (Stern-Gamma 補正付き) ---
+    # --- 4-6〜4-9. 三連複/三連単/馬単/ワイド (Stern-Gamma 補正付き) ---
+    # 高速版: レース×組み合わせのEVを1回だけ計算し、min_ev のスイープは
+    # 軽量な集計で済ませる（従来は gain_ev が n_samples 回すべて再計算しており、
+    # 三連単がタイムアウトする主因だった）。数式・分岐ロジックは元のまま。
     g_trio = pd.DataFrame()
     if me is not None:
         print(f"\n[4-6] 三連複 EV (Stern-Gamma, top_k=6) ...")
         try:
-            def trio_func(X, min_ev=1.0):
-                return me.trio_return_ev(
-                    X, min_ev=min_ev, top_k=6,
-                    ranker_model=ranker_model,
-                )
-            g_trio = gain_ev(trio_func, X_test, n_samples=N_SAMPLES, ev_range=EV_RANGE)
+            rows = me.trio_ev_rows(X_test, top_k=6, ranker_model=ranker_model)
+            g_trio = me.sweep_ev_rows(rows, n_samples=N_SAMPLES, ev_range=EV_RANGE)
             if not g_trio.empty:
                 print(f"  Max: {g_trio['return_rate'].max():.4f} @ {g_trio['return_rate'].idxmax():.3f}")
         except Exception as e:
             print(f"  [ERROR] 三連複: {e}")
 
-    # --- 4-7. 三連単 EVベース (Stern-Gamma 補正付き) ---
     g_trifecta = pd.DataFrame()
     if me is not None:
         print(f"\n[4-7] 三連単 EV (Stern-Gamma, top_k=5) ...")
         try:
-            def trifecta_func(X, min_ev=1.0):
-                return me.trifecta_return_ev(
-                    X, min_ev=min_ev, top_k=5,
-                    ranker_model=ranker_model,
-                )
-            g_trifecta = gain_ev(trifecta_func, X_test, n_samples=N_SAMPLES, ev_range=EV_RANGE)
+            rows = me.trifecta_ev_rows(X_test, top_k=5, ranker_model=ranker_model)
+            g_trifecta = me.sweep_ev_rows(rows, n_samples=N_SAMPLES, ev_range=EV_RANGE)
             if not g_trifecta.empty:
                 print(f"  Max: {g_trifecta['return_rate'].max():.4f} @ {g_trifecta['return_rate'].idxmax():.3f}")
         except Exception as e:
             print(f"  [ERROR] 三連単: {e}")
 
-    # --- 4-8. 馬単 EVベース ---
     g_exacta = pd.DataFrame()
     if me is not None:
         print(f"\n[4-8] 馬単 EV (Stern-Gamma) ...")
         try:
-            def exacta_func(X, min_ev=1.0):
-                return me.exacta_return_ev(
-                    X, min_ev=min_ev,
-                    ranker_model=ranker_model,
-                )
-            g_exacta = gain_ev(exacta_func, X_test, n_samples=N_SAMPLES, ev_range=EV_RANGE)
+            rows = me.exacta_ev_rows(X_test, ranker_model=ranker_model)
+            g_exacta = me.sweep_ev_rows(rows, n_samples=N_SAMPLES, ev_range=EV_RANGE)
             if not g_exacta.empty:
                 print(f"  Max: {g_exacta['return_rate'].max():.4f} @ {g_exacta['return_rate'].idxmax():.3f}")
         except Exception as e:
             print(f"  [ERROR] 馬単: {e}")
 
-    # --- 4-9. ワイド EVベース ---
     g_wide = pd.DataFrame()
     if me is not None:
         print(f"\n[4-9] ワイド EV (Stern-Gamma, top_k=8) ...")
         try:
-            def wide_func(X, min_ev=1.0):
-                return me.wide_return_ev(
-                    X, min_ev=min_ev, top_k=8,
-                    ranker_model=ranker_model,
-                )
-            g_wide = gain_ev(wide_func, X_test, n_samples=N_SAMPLES, ev_range=EV_RANGE)
+            rows = me.wide_ev_rows(X_test, top_k=8, ranker_model=ranker_model)
+            g_wide = me.sweep_ev_rows(rows, n_samples=N_SAMPLES, ev_range=EV_RANGE)
             if not g_wide.empty:
                 print(f"  Max: {g_wide['return_rate'].max():.4f} @ {g_wide['return_rate'].idxmax():.3f}")
         except Exception as e:

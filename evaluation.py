@@ -927,6 +927,122 @@ class ModelEvaluator:
         return_rate = np.sum(return_list) / n_bets
         return n_bets, return_rate, n_hits, std
 
+    # -----------------------------------------------------------------
+    # 高速版: EVテーブルを1度だけ計算し、閾値スイープを使い回す
+    #
+    # 元の trio/trifecta/exacta/wide_return_ev は gain_ev から n_samples 回
+    # （既定25〜50回）呼ばれ、そのたびに全レース×全組み合わせのStern-Gamma確率を
+    # 計算し直していた（min_ev はフィルタ条件にしか使わないため本来不要な再計算）。
+    # ここでは同じ数式・同じ分岐ロジックを保ったまま、min_ev に依存しない部分
+    # （race_id, ev, actual_return）だけを1回計算してテーブル化し、
+    # 閾値スイープは軽量な集計のみで済ませる。
+    # -----------------------------------------------------------------
+    _EXOTIC_BET_ARG = {
+        "sanrenpuku": lambda combo: set(int(c) for c in combo),
+        "sanrentan": lambda combo: list(int(c) for c in combo),
+        "umatan": lambda combo: list(int(c) for c in combo),
+        "wide": lambda combo: [int(combo[0]), int(combo[1])],
+    }
+
+    def _build_exotic_ev_rows(
+        self, X, bet_kind, prob_fn, combo_size, ordered,
+        top_k=None, ranker_model=None, stern_r=None,
+    ) -> pd.DataFrame:
+        """(race_id, ev, actual_return) のテーブルを1回だけ計算する。"""
+        from position_probability import PositionProbabilityEstimator
+
+        if stern_r is None:
+            stern_r = PositionProbabilityEstimator.load_stern_r()
+        combo_iter = permutations if ordered else combinations
+        arg_fn = self._EXOTIC_BET_ARG[bet_kind]
+
+        rows = []
+        for race_id in X.index.unique():
+            race_X = X.loc[[race_id]]
+            if len(race_X) < combo_size:
+                continue
+            try:
+                p_win, umaban = self._compute_race_p_win(
+                    race_X, use_ranker=(ranker_model is not None),
+                    ranker_model=ranker_model,
+                )
+            except Exception:
+                continue
+
+            ppe = PositionProbabilityEstimator(p_win, umaban, stern_r=stern_r)
+
+            if top_k is not None:
+                candidates = umaban[np.argsort(-p_win)[:top_k]]
+            else:
+                candidates = umaban
+
+            for combo in combo_iter(candidates, combo_size):
+                prob = prob_fn(ppe, *[int(c) for c in combo])
+                try:
+                    actual_return = self.bet(race_id, bet_kind, arg_fn(combo), 1)
+                    ev = prob * actual_return * 100 if actual_return > 0 else 0.0
+                except Exception:
+                    actual_return, ev = 0.0, 0.0
+                rows.append((race_id, ev, actual_return))
+
+        return pd.DataFrame(rows, columns=["race_id", "ev", "actual_return"])
+
+    @staticmethod
+    def sweep_ev_rows(ev_rows: pd.DataFrame, n_samples=50, ev_range=None) -> pd.DataFrame:
+        """事前計算済みのEVテーブルを閾値でスイープする（gain_evと同じ集計式）。"""
+        if ev_range is None:
+            ev_range = [0.8, 2.0]
+        lo, hi = ev_range
+        gain_dict = {}
+        if ev_rows.empty:
+            return pd.DataFrame()
+        for i in range(n_samples):
+            min_ev = lo + (hi - lo) * i / n_samples
+            sub = ev_rows[ev_rows["ev"] >= min_ev]
+            if sub.empty:
+                continue
+            grp = sub.groupby("race_id")["actual_return"].agg(["sum", "count"])
+            n_bets = int(grp["count"].sum())
+            if n_bets <= 2:
+                continue
+            return_list = grp["sum"].to_numpy()
+            std = np.std(return_list) * np.sqrt(len(return_list)) / n_bets
+            n_hits = int(np.sum(return_list > 0))
+            return_rate = float(np.sum(return_list) / n_bets)
+            gain_dict[min_ev] = {
+                "return_rate": return_rate, "n_hits": n_hits,
+                "std": std, "n_bets": n_bets,
+            }
+        return pd.DataFrame(gain_dict).T
+
+    def trio_ev_rows(self, X, top_k=6, ranker_model=None, stern_r=None) -> pd.DataFrame:
+        return self._build_exotic_ev_rows(
+            X, "sanrenpuku", lambda ppe, a, b, c: ppe.p_trio(a, b, c),
+            combo_size=3, ordered=False, top_k=top_k,
+            ranker_model=ranker_model, stern_r=stern_r,
+        )
+
+    def trifecta_ev_rows(self, X, top_k=5, ranker_model=None, stern_r=None) -> pd.DataFrame:
+        return self._build_exotic_ev_rows(
+            X, "sanrentan", lambda ppe, a, b, c: ppe.p_trifecta(a, b, c),
+            combo_size=3, ordered=True, top_k=top_k,
+            ranker_model=ranker_model, stern_r=stern_r,
+        )
+
+    def exacta_ev_rows(self, X, top_k=None, ranker_model=None, stern_r=None) -> pd.DataFrame:
+        return self._build_exotic_ev_rows(
+            X, "umatan", lambda ppe, a, b: ppe.p_exacta(a, b),
+            combo_size=2, ordered=True, top_k=top_k,
+            ranker_model=ranker_model, stern_r=stern_r,
+        )
+
+    def wide_ev_rows(self, X, top_k=8, ranker_model=None, stern_r=None) -> pd.DataFrame:
+        return self._build_exotic_ev_rows(
+            X, "wide", lambda ppe, a, b: ppe.p_wide(a, b),
+            combo_size=2, ordered=False, top_k=top_k,
+            ranker_model=ranker_model, stern_r=stern_r,
+        )
+
     def exacta_return_ev(
         self, X, min_ev=1.0, max_odds=100, ranker_model=None, stern_r=None
     ):
