@@ -13,3 +13,10 @@ playwright
 tabulate
 streamlit
 huggingface_hub
+
+# --- ローカル専用（JRA公式のリアルタイムオッズ取得用。クラウドでは未使用） ---
+# 更新手順:
+#   pip install -U playwright patchright scrapling
+#   playwright install chromium
+#   patchright install chromium
+# ※ main.py の実行ではライブラリは更新されません

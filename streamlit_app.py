@@ -11,6 +11,7 @@ streamlit_app.py -- 競馬AI レース予測（公開版）
 """
 
 import hmac
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import cloud_storage
-from modules.constants import local_paths
+from modules.constants import local_paths, master
 from position_probability import PositionProbabilityEstimator
 from predict import (
     build_combo_table,
@@ -144,26 +145,101 @@ def check_password() -> str | None:
 # ---------------------------------------------------------------------------
 MIN_INTERVAL_SEC = 15  # 連打による外部サイトへの過剰アクセスを防ぐための簡易クールダウン
 
+# 場所コード → 場所名（netkeibaレースIDの5〜6桁目）
+PLACE_NAME = {v: k for k, v in master.PLACE_DICT.items()}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_race_ids_for_date(yyyymmdd: str) -> list[str]:
+    """指定日の全レースIDをnetkeibaから取得する（10分キャッシュ）。"""
+    url = (f"https://race.netkeiba.com/top/race_list_sub.html"
+           f"?kaisai_date={yyyymmdd}")
+    headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36")}
+    res = requests.get(url, headers=headers, timeout=15)
+    res.encoding = "EUC-JP"
+    ids = re.findall(r"race_id=(\d{12})", res.text)
+    seen: set[str] = set()
+    unique = []
+    for rid in ids:
+        if rid not in seen:
+            seen.add(rid)
+            unique.append(rid)
+    return unique
+
 
 def render_predict() -> None:
-    st.caption(
-        "netkeibaの出馬表URL末尾にある12桁のレースIDを入力してください。"
-        "例: `race_id=202605010811` -> `202605010811`"
-    )
     st.info(
         "本ツールは個人の研究目的で作成した予測モデルです。的中や利益を保証するものではありません。",
         icon="ℹ️",
     )
 
-    col1, col2 = st.columns([2, 1])
+    # --- 日付・場所・レース番号からレースIDを解決 ---
+    col1, col2, col3 = st.columns([1.2, 1, 1])
     with col1:
-        race_id = st.text_input("レースID（12桁）", max_chars=12, placeholder="202605010811")
-    with col2:
         race_date = st.date_input("開催日", value=datetime.now())
 
+    race_id = ""
+    race_ids_of_day: list[str] = []
+    fetch_error = None
+    try:
+        race_ids_of_day = fetch_race_ids_for_date(race_date.strftime("%Y%m%d"))
+    except Exception as e:
+        fetch_error = str(e)
+
+    if race_ids_of_day:
+        by_place: dict[str, list[str]] = {}
+        for rid in race_ids_of_day:
+            by_place.setdefault(rid[4:6], []).append(rid)
+        with col2:
+            place_code = st.selectbox(
+                "場所", sorted(by_place),
+                format_func=lambda c: PLACE_NAME.get(c, f"場所{c}"),
+            )
+        with col3:
+            rids = sorted(by_place[place_code], key=lambda r: int(r[10:12]))
+            race_id = st.selectbox(
+                "レース", rids,
+                index=min(10, len(rids) - 1),  # メインレースになりやすい11Rを初期選択
+                format_func=lambda r: f"{int(r[10:12])}R",
+            )
+    else:
+        with col2:
+            st.selectbox("場所", ["—"], disabled=True)
+        with col3:
+            st.selectbox("レース", ["—"], disabled=True)
+        if fetch_error:
+            st.warning(f"開催情報の取得に失敗しました（{fetch_error}）。"
+                       "下の「レースIDを直接入力」を使ってください。")
+        else:
+            st.info(
+                "この日の開催情報が見つかりません（開催の無い日か、出馬表の公開前です）。"
+                "別の日を選ぶか、下の「レースIDを直接入力」を使ってください。"
+            )
+
+    # --- 上級者向け: レースIDの直接入力（入力があれば選択より優先） ---
+    with st.expander("レースIDを直接入力（上級者向け）"):
+        st.caption(
+            "netkeibaの出馬表URL末尾の12桁を入力します。"
+            "例: `race_id=202605010811` -> `202605010811`"
+        )
+        manual_id = st.text_input("レースID（12桁）", max_chars=12,
+                                  placeholder="202605010811")
+        if manual_id:
+            if manual_id.isdigit() and len(manual_id) == 12:
+                race_id = manual_id
+                st.caption("↑ この入力を優先して使用します。")
+            else:
+                st.error("レースIDは半角数字12桁で入力してください。")
+
+    if race_id:
+        place_label = PLACE_NAME.get(race_id[4:6], "")
+        st.caption(
+            f"予測対象: {race_date.strftime('%Y/%m/%d')} "
+            f"{place_label} {int(race_id[10:12])}R（レースID: {race_id}）"
+        )
+
     valid_race_id = bool(race_id) and race_id.isdigit() and len(race_id) == 12
-    if race_id and not valid_race_id:
-        st.error("レースIDは半角数字12桁で入力してください。")
 
     model_exists = (local_paths.MODEL_DIR / "lgbm_model.pickle").exists() or \
         (local_paths.MODEL_DIR / "lgbm_ranker.pickle").exists()
