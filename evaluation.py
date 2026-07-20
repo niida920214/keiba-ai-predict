@@ -1015,6 +1015,38 @@ class ModelEvaluator:
             }
         return pd.DataFrame(gain_dict).T
 
+    @staticmethod
+    def sweep_ev_rows_per_bet(ev_rows: pd.DataFrame, n_samples=50, ev_range=None) -> pd.DataFrame:
+        """事前計算済みのEVテーブルを閾値でスイープする（ベット単位の集計版）。
+
+        sweep_ev_rows はレースごとに return を合算してから std を取るが
+        （trio/trifecta/exacta/wide の元実装がそうだったため）、
+        Benter-Ranker戦略の元実装は同一レース内の複数ベットを合算せず、
+        ベット1件ごとに独立した値として std を計算していた。集計単位が
+        違うだけで数式は同じなので、専用にこちらを用意する。
+        """
+        if ev_range is None:
+            ev_range = [0.8, 2.0]
+        lo, hi = ev_range
+        gain_dict = {}
+        if ev_rows.empty:
+            return pd.DataFrame()
+        for i in range(n_samples):
+            min_ev = lo + (hi - lo) * i / n_samples
+            sub = ev_rows[ev_rows["ev"] >= min_ev]
+            n_bets = len(sub)
+            if n_bets <= 2:
+                continue
+            returns = sub["actual_return"].to_numpy()
+            std = np.std(returns) * np.sqrt(n_bets) / n_bets
+            n_hits = int(np.sum(returns > 0))
+            return_rate = float(np.sum(returns) / n_bets)
+            gain_dict[min_ev] = {
+                "return_rate": return_rate, "n_hits": n_hits,
+                "std": std, "n_bets": n_bets,
+            }
+        return pd.DataFrame(gain_dict).T
+
     def trio_ev_rows(self, X, top_k=6, ranker_model=None, stern_r=None) -> pd.DataFrame:
         return self._build_exotic_ev_rows(
             X, "sanrenpuku", lambda ppe, a, b, c: ppe.p_trio(a, b, c),

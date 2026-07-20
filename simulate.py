@@ -51,6 +51,54 @@ def gain_ev(return_func, X, n_samples=50, ev_range=None):
     return pd.DataFrame(gain_dict).T
 
 
+def build_benter_ev_rows(X: pd.DataFrame, ranker_model, me: ModelEvaluator) -> pd.DataFrame:
+    """Benter-Ranker戦略の (race_id, umaban, odds, ev, actual_return) を1回だけ計算する。
+
+    元の benter_return_func は gain_ev から min_ev ごと(かつ max_odds ごと)に
+    呼ばれ、そのたびに ranker_model.predict() をX_test全件(15万行規模)に対して
+    再実行していた（min_ev/max_odds はどちらも予測結果に影響しないフィルタ
+    条件でしかないため、本来は不要な再計算）。ここでは予測とper-race softmax
+    を1回だけ行い、閾値スイープは sweep_ev_rows 側の軽量な集計に任せる。
+    """
+    rfeat = ranker_model.feature_name_
+    if callable(rfeat):
+        rfeat = rfeat()
+    X_r = X.copy()
+    for f in rfeat:
+        if f not in X_r.columns:
+            X_r[f] = np.nan
+    X_r = X_r[rfeat]
+    for col in X_r.columns:
+        if X_r[col].dtype == object:
+            X_r[col] = pd.to_numeric(X_r[col], errors="coerce")
+
+    scores = ranker_model.predict(X_r)
+
+    if "単勝" not in X.columns:
+        return pd.DataFrame(columns=["race_id", "umaban", "odds", "ev", "actual_return"])
+
+    rows = []
+    for race_id in X.index.unique():
+        mask = X.index == race_id
+        race_scores = scores[mask]
+        e_x = np.exp(race_scores - np.max(race_scores))
+        p_win = e_x / e_x.sum()
+
+        race_X = X[mask]
+        umaban_arr = (race_X["馬番"].to_numpy() if "馬番" in race_X.columns
+                     else np.arange(1, len(race_X) + 1))
+        odds_arr = race_X["単勝"].to_numpy()
+
+        for uma, p, odds in zip(umaban_arr, p_win, odds_arr):
+            if not (odds > 0):
+                continue
+            ev = p * odds
+            actual_return = me.bet(race_id, "tansho", int(uma), 1)
+            rows.append((race_id, int(uma), float(odds), float(ev), float(actual_return)))
+
+    return pd.DataFrame(rows, columns=["race_id", "umaban", "odds", "ev", "actual_return"])
+
+
 def checkpoint_upload(*paths) -> None:
     """成果物を保存した直後にクラウドへ逐次アップロードする。
 
@@ -251,76 +299,22 @@ def main() -> None:
             print(f"  Max: {g_kelly_win['return_rate'].max():.4f}")
 
     # --- 4-5. Benter (Ranker) Strategy ---
+    # 高速版: ranker_model.predict() と per-race softmax を1回だけ計算し、
+    # max_odds/min_ev の二重スイープは軽量な集計のみで済ませる（従来は
+    # min_ev 20回 × max_odds 2回 = 40回、X_test全件のRanker推論を再実行しており
+    # Benter-Rankerだけ他戦略の10〜30倍遅い主因だった）。数式は元のまま。
     ev_benter_results = {}
     if ranker_model is not None and me is not None:
+        print("\n[4-5] Benter-Ranker: レースごとのEVを計算中...")
+        benter_rows = build_benter_ev_rows(X_test, ranker_model, me)
         for max_odds in [20, 30]:
             print(f"\n[4-5] Benter-Ranker (odds<={max_odds}) ...")
-
-            def benter_return_func(X, min_ev=1.0, _max_odds=max_odds):
-                """Ranker softmax -> EV -> bet."""
-                # Get ranker features
-                rfeat = ranker_model.feature_name_
-                if callable(rfeat):
-                    rfeat = rfeat()
-                X_r = X.copy()
-                for f in rfeat:
-                    if f not in X_r.columns:
-                        X_r[f] = np.nan
-                X_r = X_r[rfeat]
-                for col in X_r.columns:
-                    if X_r[col].dtype == object:
-                        X_r[col] = pd.to_numeric(X_r[col], errors='coerce')
-
-                scores = ranker_model.predict(X_r)
-
-                # Per-race softmax + EV computation
-                unique_races = X.index.unique()
-                bet_data = []
-                for race_id in unique_races:
-                    mask = X.index == race_id
-                    race_scores = scores[mask]
-                    e_x = np.exp(race_scores - np.max(race_scores))
-                    p_win = e_x / e_x.sum()
-
-                    race_X = X[mask].copy()
-                    race_X["p_win"] = p_win
-                    if "馬番" in race_X.columns:
-                        race_X["umaban"] = race_X["馬番"]
-                    else:
-                        race_X["umaban"] = range(1, len(race_X) + 1)
-                    if "単勝" in X.columns:
-                        race_X["odds"] = X.loc[mask, "単勝"].values
-                    else:
-                        continue
-
-                    race_X = race_X[race_X["odds"] <= _max_odds]
-                    race_X = race_X[race_X["odds"] > 0]
-                    race_X["ev"] = race_X["p_win"] * race_X["odds"]
-                    race_X = race_X[race_X["ev"] >= min_ev]
-                    if len(race_X) > 0:
-                        for _, row in race_X.iterrows():
-                            bet_data.append({
-                                "race_id": race_id,
-                                "umaban": int(row["umaban"]),
-                                "ev": row["ev"],
-                            })
-
-                n_bets = len(bet_data)
-                if n_bets == 0:
-                    return 0, 0.0, 0, 0.0
-
-                return_list = []
-                for bd in bet_data:
-                    ret = me.bet(bd["race_id"], "tansho", bd["umaban"], 1)
-                    return_list.append(ret)
-                if not return_list:
-                    return 0, 0.0, 0, 0.0
-                std = np.std(return_list) * np.sqrt(len(return_list)) / n_bets
-                n_hits = np.sum([x > 0 for x in return_list])
-                return_rate = np.sum(return_list) / n_bets
-                return n_bets, return_rate, n_hits, std
-
-            g = gain_ev(benter_return_func, X_test, n_samples=N_SAMPLES, ev_range=EV_RANGE)
+            sub = benter_rows[benter_rows["odds"] <= max_odds]
+            # 元実装はレース単位で合算せずベット単位でstdを取るため専用の集計を使う
+            g = me.sweep_ev_rows_per_bet(
+                sub[["race_id", "ev", "actual_return"]],
+                n_samples=N_SAMPLES, ev_range=EV_RANGE,
+            )
             ev_benter_results[max_odds] = g
             if not g.empty:
                 print(f"  Max: {g['return_rate'].max():.4f} @ {g['return_rate'].idxmax():.3f}")
