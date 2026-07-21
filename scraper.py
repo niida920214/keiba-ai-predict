@@ -124,13 +124,20 @@ ajax_rate_limiter = AdaptiveRateLimiter(
 REQUEST_INTERVAL = rate_limiter.base_interval
 
 
-def safe_get(url: str, limiter: AdaptiveRateLimiter | None = None) -> requests.Response:
+def safe_get(
+    url: str, limiter: AdaptiveRateLimiter | None = None, max_retries: int = 8,
+) -> requests.Response:
     """
-    HTTP GET を実行し、必ず成功するまでリトライする（スキップしない）。
-    400/429 発生時はインターバルを段階的に延長してリトライ。
+    HTTP GET を実行する。400/429/503発生時はインターバルを段階的に延長してリトライ。
+
+    max_retries回（既定8回）連続で解決しない場合は例外を送出する。
+    以前は無限リトライしており、netkeiba側の持続的なブロック時に
+    プロセスが実質ハングし続ける問題があったため上限を設けている。
     """
     _limiter = limiter or rate_limiter
+    attempts = 0
     while True:
+        attempts += 1
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         try:
             res = requests.get(url, headers=headers, timeout=30)
@@ -138,8 +145,17 @@ def safe_get(url: str, limiter: AdaptiveRateLimiter | None = None) -> requests.R
                 _limiter.on_success()
                 return res
             elif res.status_code in (400, 429, 503):
+                if attempts >= max_retries:
+                    raise RuntimeError(
+                        f"HTTP {res.status_code} が {attempts} 回連続で解決しません: {url}"
+                    )
                 _limiter.on_rate_limit(res.status_code)
             else:
+                if attempts >= max_retries:
+                    raise RuntimeError(
+                        f"HTTP {res.status_code} (予期せぬステータス) が "
+                        f"{attempts} 回連続で解決しません: {url}"
+                    )
                 print(
                     f"\n  ⚠ HTTP {res.status_code} (予期せぬステータス) — 30秒待機してリトライ"
                 )
@@ -147,7 +163,27 @@ def safe_get(url: str, limiter: AdaptiveRateLimiter | None = None) -> requests.R
         except KeyboardInterrupt:
             raise
         except requests.exceptions.RequestException as e:
+            if attempts >= max_retries:
+                raise RuntimeError(
+                    f"接続エラーが {attempts} 回連続で解決しません: {url} ({e})"
+                ) from e
             _limiter.on_error(e)
+
+
+def _is_stub_race_page(content: bytes) -> bool:
+    """
+    レース結果ページが空のプレースホルダーかどうかを判定する。
+
+    netkeibaはレート制限（ソフトブロック）時や、まれに存在しないレースIDに対して
+    HTTP 200 のまま「data_introはあるが日付が1970年01月01日、結果テーブルなし」
+    という空ページを返す。safe_get は状態コードしか見ないため、この状態は
+    通常の200成功として扱われてしまい、パース段階で静かに0件になっていた。
+    """
+    try:
+        text = content.decode("euc-jp", errors="replace")
+    except Exception:
+        return False
+    return "1970年01月01日" in text and "レース結果" not in text
 
 
 # ===================================================================
@@ -161,30 +197,58 @@ class Results:
         race_id_list: list[str],
         save_dir: str = str(local_paths.HTML_RACE_DIR),
         skip: bool = True,
+        max_stub_retries: int = 3,
     ) -> list[str]:
         """
         race ページの HTML をスクレイピングして保存する。
+
+        空のプレースホルダーページ（レート制限や未掲載の可能性）を検知した場合は
+        バックオフして最大 max_stub_retries 回まで再試行する。それでも解決しない
+        場合はこの race_id をスキップする（キャッシュには保存しない = 次回また
+        新規として再試行される。以前は空ページをそのまま保存していたため、一度
+        ブロックされた race_id は永久に「取得済みの空データ」として扱われ、
+        二度と再取得されなかった）。
         """
         save_dir_path = Path(save_dir)
         save_dir_path.mkdir(parents=True, exist_ok=True)
         html_path_list = []
+        n_stub_final = 0
 
         for race_id in tqdm(race_id_list, desc="Download HTML (Race)"):
             file_path = save_dir_path / f"{race_id}.bin"
-            html_path_list.append(str(file_path))
 
             if skip and file_path.exists():
+                html_path_list.append(str(file_path))
                 continue
 
+            url = url_paths.RACE_URL + race_id
+            content = None
             try:
-                url = url_paths.RACE_URL + race_id
-                res = safe_get(url)
-                # ファイル書き込み (バイナリ)
-                with open(file_path, "wb") as f:
-                    f.write(res.content)
+                for attempt in range(1, max_stub_retries + 1):
+                    res = safe_get(url)
+                    if not _is_stub_race_page(res.content):
+                        content = res.content
+                        break
+                    if attempt < max_stub_retries:
+                        rate_limiter.on_rate_limit(res.status_code)
                 rate_limiter.wait()
             except Exception as e:
                 print(f"[Results] Download Error at {race_id}: {e}")
+                continue
+
+            if content is None:
+                n_stub_final += 1
+                continue
+
+            with open(file_path, "wb") as f:
+                f.write(content)
+            html_path_list.append(str(file_path))
+
+        if n_stub_final:
+            print(
+                f"  [WARN] {n_stub_final} 件のレースが空ページのため取得できませんでした"
+                "（レート制限、または結果未掲載の可能性）。次回の実行で再試行されます。"
+            )
 
         return html_path_list
 
@@ -197,6 +261,7 @@ class Results:
         from modules.constants.master import RACE_CLASS_DICT
 
         race_results: dict[str, pd.DataFrame] = {}
+        n_parse_fail = 0
 
         for html_path in tqdm(html_path_list, desc="Parse HTML (Results)"):
             try:
@@ -280,7 +345,14 @@ class Results:
                 race_results[race_id] = df
 
             except Exception as e:
+                n_parse_fail += 1
                 continue
+
+        if n_parse_fail:
+            print(
+                f"  [WARN] {n_parse_fail} 件のレースはHTML解析に失敗しました"
+                "（ページ構造が想定と異なる等）。"
+            )
 
         if not race_results:
             return pd.DataFrame()
@@ -293,7 +365,10 @@ class Results:
         互換性のためのラッパー。HTML ダウンロード -> 解析 を一括で行う。
         """
         html_files = Results.download_html(race_id_list)
-        return Results.scrape_from_html(html_files)
+        df = Results.scrape_from_html(html_files)
+        n_got = df.index.nunique() if not df.empty else 0
+        print(f"  [Results] {len(race_id_list)} 件中 {n_got} 件のレース結果を取得しました。")
+        return df
 
 
 # ===================================================================
